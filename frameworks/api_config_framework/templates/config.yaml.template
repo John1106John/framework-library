@@ -1,0 +1,20 @@
+# ===== API 設定檔 =====
+# 集中管理 AI 模型與 API 參數
+# 修改此檔案即可一鍵切換所有腳本使用的模型
+
+# AI 模型名稱
+model_name: "gemini-2.5-flash"
+
+# 配額限制時的重試等待秒數
+retry_delay: 2.0
+
+# 同腳本內連續 API 呼叫的間隔秒數（避免觸發 rate limit）
+api_call_interval: 2
+
+# ===== 專案特定參數（可選） =====
+# 根據你的專案需求新增參數
+
+# 範例：
+# max_tokens: 1000
+# temperature: 0.7
+# top_p: 0.9

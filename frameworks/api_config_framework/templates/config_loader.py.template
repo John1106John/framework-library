@@ -1,0 +1,53 @@
+"""
+集中式設定檔讀取工具
+從專案根目錄的 config.yaml 讀取所有設定
+"""
+
+import yaml
+from pathlib import Path
+from functools import lru_cache
+
+_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+
+
+@lru_cache(maxsize=1)
+def _load_config() -> dict:
+    """讀取並快取 config.yaml"""
+    with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def get_config() -> dict:
+    """取得完整設定 dict"""
+    return _load_config()
+
+
+def get_model_name() -> str:
+    """取得 AI 模型名稱"""
+    return _load_config().get("model_name", "gemini-2.5-flash")
+
+
+def get_retry_delay() -> float:
+    """取得配額重試延遲秒數"""
+    return float(_load_config().get("retry_delay", 2.0))
+
+
+def get_api_call_interval() -> int:
+    """取得 API 呼叫間隔秒數"""
+    return int(_load_config().get("api_call_interval", 2))
+
+
+def reload_config():
+    """清除快取，強制重新讀取（UI 修改後呼叫）"""
+    _load_config.cache_clear()
+
+
+# ===== 專案特定參數 =====
+# 根據你的專案需求新增 getter 函數
+#
+# 範例：
+# def get_max_tokens() -> int:
+#     return int(_load_config().get("max_tokens", 1000))
+#
+# def get_temperature() -> float:
+#     return float(_load_config().get("temperature", 0.7))

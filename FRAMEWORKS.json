@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-02-10",
+  "repository": {
+    "name": "framework-library",
+    "owner": "John1106John",
+    "url": "https://github.com/John1106John/framework-library",
+    "description": "可重用的架構規格庫"
+  },
+  "frameworks": [
+    {
+      "id": "api-config-framework",
+      "name": "API 設定與金鑰管理框架",
+      "version": "1.0.0",
+      "description": "集中式 API 設定與自動循環金鑰輪替系統",
+      "author": "John1106John",
+      "created_at": "2026-02-10",
+      "updated_at": "2026-02-10",
+      "tech_stack": ["Python 3.10+", "pyyaml", "python-dotenv"],
+      "tags": ["api-management", "key-rotation", "config", "yaml"],
+      "path": "frameworks/api_config_framework",
+      "files": {
+        "spec": "api_config_framework_spec.yaml",
+        "readme": "README.md",
+        "integration_prompt": "AI_INTEGRATION_PROMPT.md"
+      },
+      "has_templates": true,
+      "has_examples": true,
+      "download_url": "https://github.com/John1106John/framework-library/tree/main/frameworks/api_config_framework",
+      "raw_spec_url": "https://raw.githubusercontent.com/John1106John/framework-library/main/frameworks/api_config_framework/api_config_framework_spec.yaml"
+    },
+    {
+      "id": "prompt-management",
+      "name": "Prompt 管理系統",
+      "version": "1.0.0",
+      "description": "AI Workflow 的 Prompt 版本管理系統",
+      "author": "John1106John",
+      "created_at": "2026-02-09",
+      "updated_at": "2026-02-09",
+      "tech_stack": ["Python 3.10+", "Streamlit", "json"],
+      "tags": ["prompt-management", "version-control", "ui", "streamlit"],
+      "path": "frameworks/prompt_management_framework",
+      "files": {
+        "spec": "prompt_management_system_spec.yaml",
+        "readme": "README_PROMPT_SPEC.md",
+        "integration_prompt": "AI_INTEGRATION_PROMPT.md"
+      },
+      "has_templates": false,
+      "has_examples": false,
+      "download_url": "https://github.com/John1106John/framework-library/tree/main/frameworks/prompt_management_framework",
+      "raw_spec_url": "https://raw.githubusercontent.com/John1106John/framework-library/main/frameworks/prompt_management_framework/prompt_management_system_spec.yaml"
+    }
+  ]
+}

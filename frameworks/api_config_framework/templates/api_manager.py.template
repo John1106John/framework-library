@@ -1,0 +1,262 @@
+"""
+API 金鑰管理器 - 支援自動循環輪替
+
+功能：
+- 自動管理多個 API 金鑰
+- 遇到配額限制時自動切換到下一個金鑰
+- 循環輪替：用完最後一把會回到第一把重試
+- 支援重試機制
+- 詳細的日誌輸出
+"""
+
+import os
+import time
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+from dotenv import load_dotenv
+
+# TODO: 替換成你使用的 API SDK
+import google.generativeai as genai
+
+# 從專案的 config loader 匯入
+# TODO: 根據你的專案路徑調整 import
+from utils.config import get_model_name, get_retry_delay
+
+# 自動載入 .env 文件
+load_dotenv()
+
+
+# 設定日誌
+def setup_logging():
+    """設定日誌系統"""
+    # 創建 logs 目錄
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    # 日誌文件名包含日期
+    log_file = log_dir / f"api_{datetime.now().strftime('%Y%m%d')}.log"
+
+    # 配置日誌格式
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.StreamHandler()  # 同時輸出到控制台
+        ]
+    )
+
+    return logging.getLogger('APIManager')
+
+
+# 初始化日誌
+logger = setup_logging()
+
+
+class APIManager:
+    """API 金鑰管理器，支援自動循環輪替"""
+
+    def __init__(self, model_name: str = None):
+        """
+        初始化 API 管理器
+
+        Args:
+            model_name: 模型名稱（預設從 config.yaml 讀取）
+        """
+        if model_name is None:
+            model_name = get_model_name()
+        logger.info(f"初始化 APIManager (模型: {model_name})")
+        self.model_name = model_name
+        self.api_keys = self._load_api_keys()
+        self.current_key_index = 0
+        self._start_key_index = 0  # 記錄每次呼叫的起始金鑰，用於循環檢測
+
+        if not self.api_keys:
+            logger.error("未找到任何 API 金鑰")
+            raise ValueError("未找到任何 API 金鑰！請檢查環境變數")
+
+        logger.info(f"成功載入 {len(self.api_keys)} 個 API 金鑰")
+        print(f"[OK] 已載入 {len(self.api_keys)} 個 API 金鑰")
+        self._configure_current_key()
+
+    def _load_api_keys(self) -> List[str]:
+        """
+        從環境變數載入 API 金鑰
+
+        支援兩種方式：
+        1. API_KEYS=key1,key2,key3（多個金鑰，逗號分隔）
+        2. GOOGLE_API_KEY=single_key（單一金鑰）
+
+        TODO: 根據你使用的 API 調整環境變數名稱
+        """
+        api_keys = []
+
+        # 方法一：從 API_KEYS 環境變數讀取（逗號分隔）
+        keys_str = os.getenv("API_KEYS", "")
+        if keys_str:
+            api_keys = [key.strip() for key in keys_str.split(",") if key.strip()]
+
+        # 方法二：如果沒有 API_KEYS，則使用單一的 API Key
+        if not api_keys:
+            # TODO: 改成你的環境變數名稱（如 OPENAI_API_KEY, ANTHROPIC_API_KEY）
+            single_key = os.getenv("GOOGLE_API_KEY", "")
+            if single_key:
+                api_keys = [single_key]
+
+        return api_keys
+
+    def _configure_current_key(self):
+        """配置當前使用的 API 金鑰"""
+        current_key = self.api_keys[self.current_key_index]
+
+        # TODO: 替換成你使用的 API 設定方式
+        genai.configure(api_key=current_key)
+
+        # 顯示金鑰的前後各4位（保護隱私）
+        masked_key = f"{current_key[:8]}...{current_key[-4:]}"
+        logger.info(f"配置 API 金鑰 #{self.current_key_index + 1}/{len(self.api_keys)}: {masked_key}")
+        print(f"→ 使用 API 金鑰 #{self.current_key_index + 1}: {masked_key}")
+
+    def _switch_to_next_key(self) -> bool:
+        """
+        切換到下一個 API 金鑰（循環輪替）
+
+        Returns:
+            bool: 如果成功切換返回 True，如果所有金鑰都已嘗試過返回 False
+        """
+        next_index = (self.current_key_index + 1) % len(self.api_keys)
+
+        # 如果繞回起點，表示所有金鑰都已嘗試過一輪
+        if next_index == self._start_key_index:
+            logger.warning(f"所有 {len(self.api_keys)} 個 API 金鑰都已嘗試過一輪")
+            print("[WARNING] 所有 API 金鑰都已嘗試過一輪！")
+            return False
+
+        self.current_key_index = next_index
+        logger.warning(f"金鑰配額已滿，循環切換到金鑰 #{self.current_key_index + 1}")
+        print(f"\n[WARNING] 當前金鑰配額已滿，切換到金鑰 #{self.current_key_index + 1}...")
+        self._configure_current_key()
+        return True
+
+    def generate_content(
+        self,
+        prompt: str,
+        images: Optional[List] = None,
+        max_retries: int = None,
+        retry_delay: float = None
+    ) -> str:
+        """
+        生成內容，自動處理配額限制和重試
+
+        Args:
+            prompt: 提示詞
+            images: 圖片列表（可選）
+            max_retries: 最大重試次數（預設為金鑰總數）
+            retry_delay: 重試延遲秒數（預設從 config.yaml 讀取）
+
+        Returns:
+            str: 生成的文本內容
+
+        Raises:
+            Exception: 如果所有金鑰都失敗則拋出異常
+        """
+        if max_retries is None:
+            max_retries = len(self.api_keys)
+        if retry_delay is None:
+            retry_delay = get_retry_delay()
+
+        attempt = 0
+        last_error = None
+        self._start_key_index = self.current_key_index  # 記錄本次呼叫的起始金鑰
+
+        logger.info(f"開始 API 呼叫 (嘗試次數上限: {max_retries}, 圖片數量: {len(images) if images else 0})")
+
+        while attempt < max_retries:
+            try:
+                # TODO: 替換成你使用的 API 呼叫方式
+                # 初始化模型
+                model = genai.GenerativeModel(self.model_name)
+
+                # 準備內容
+                if images:
+                    content = [prompt] + images
+                else:
+                    content = prompt
+
+                # 呼叫 API
+                logger.debug(f"嘗試 #{attempt + 1}: 呼叫 API (金鑰 #{self.current_key_index + 1})")
+                print(f"→ 正在呼叫 API...")
+                start_time = time.time()
+                response = model.generate_content(content)
+                end_time = time.time()
+
+                duration = end_time - start_time
+                logger.info(f"API 呼叫成功 (耗時: {duration:.2f}秒, 金鑰: #{self.current_key_index + 1})")
+                print(f"[OK] API 呼叫成功 (耗時 {duration:.2f} 秒)")
+                return response.text.strip()
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                last_error = e
+
+                # 判斷是否為配額限制錯誤
+                # TODO: 根據你使用的 API 調整錯誤關鍵字
+                is_quota_error = any(keyword in error_msg for keyword in [
+                    "quota", "rate limit", "resource exhausted", "429"
+                ])
+
+                if is_quota_error:
+                    logger.warning(f"配額限制錯誤 (嘗試 #{attempt + 1}): {e}")
+                    print(f"[ERROR] API 配額限制：{e}")
+
+                    # 嘗試切換到下一個金鑰
+                    if not self._switch_to_next_key():
+                        logger.error("所有 API 金鑰配額都已用完")
+                        raise Exception("所有 API 金鑰的配額都已用完！") from e
+
+                    # 等待後重試
+                    time.sleep(retry_delay)
+                    attempt += 1
+                else:
+                    # 非配額錯誤，直接拋出
+                    logger.error(f"API 呼叫失敗 (非配額錯誤): {e}", exc_info=True)
+                    print(f"[ERROR] API 呼叫失敗：{e}")
+                    raise
+
+        # 所有重試都失敗
+        logger.error(f"API 呼叫失敗，已重試 {max_retries} 次")
+        raise Exception(f"API 呼叫失敗（已重試 {max_retries} 次）") from last_error
+
+    def reset_key_index(self):
+        """重置金鑰索引到第一個"""
+        self.current_key_index = 0
+        self._configure_current_key()
+        logger.info("金鑰索引已重置到第一個")
+
+    def get_current_key_info(self) -> dict:
+        """獲取當前金鑰資訊"""
+        return {
+            "index": self.current_key_index,
+            "total_keys": len(self.api_keys),
+            "remaining_keys": len(self.api_keys) - self.current_key_index
+        }
+
+
+# 使用範例
+if __name__ == "__main__":
+    # 測試 API 管理器
+    try:
+        manager = APIManager()
+
+        print(f"\n當前狀態：{manager.get_current_key_info()}")
+
+        # 測試簡單的文本生成
+        test_prompt = "請用一句話介紹 Python。"
+        result = manager.generate_content(test_prompt)
+
+        print(f"\n生成結果：\n{result}")
+
+    except Exception as e:
+        print(f"\n錯誤：{e}")

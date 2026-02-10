@@ -1,0 +1,1063 @@
+# ============================================================================
+# Prompt Management System Specification
+# 用於 AI Workflow 的 Prompt 版本管理系統設計規格
+# ============================================================================
+# 📖 使用方式：
+#   將此 YAML 的內容作為 prompt 提供給 AI（Claude、GPT、Gemini 等），
+#   AI 即可根據此規格為你的專案建構一套完整的 Prompt 管理系統。
+#
+# 🎯 適用場景：
+#   - 多階段 AI Workflow（如報告生成、內容分析、數據處理）
+#   - 需要頻繁調整 Prompt 的專案
+#   - 需要版本管理和 A/B 測試的場景
+#
+# 📦 參考實作：
+#   本規格基於「台美 ETF 淨流量分析月報」專案的實際經驗編寫，
+#   已在生產環境驗證可行性。
+#
+# 🔖 版本：v1.0 (2026-02-09)
+# ============================================================================
+
+system_overview:
+  name: "AI Workflow Prompt Management System"
+  purpose: |
+    在多階段 AI workflow 中，每個階段 (stage) 都會呼叫 LLM API 並使用 prompt。
+    本系統提供：
+    1. 從 Python 腳本中自動提取 prompt 常數
+    2. 在 Streamlit UI 中即時編輯 prompt
+    3. 草稿暫存（不影響執行）與正式寫回腳本（影響執行）
+    4. 每次修改腳本前自動備份
+    5. 輸出版本管理（每次執行後快照，可切換主要版本）
+  tech_stack:
+    language: Python 3.10+
+    ui_framework: Streamlit
+    storage: 純檔案系統（JSON + Markdown），無需資料庫
+    dependencies:
+      - streamlit   # UI 框架
+      - pathlib     # 路徑操作（標準庫）
+      - json        # JSON 序列化（標準庫）
+      - shutil      # 檔案複製/備份（標準庫）
+      - re          # 正則表達式提取 prompt（標準庫）
+      - datetime    # 時間戳記（標準庫）
+
+# ============================================================================
+# 核心架構
+# ============================================================================
+
+architecture:
+  design_principle: |
+    「Prompt 即程式碼」— prompt 直接寫在 .py 腳本中作為 module-level 常數，
+    是 single source of truth。JSON 快取和草稿只是輔助層。
+
+    資料流：
+    .py 腳本 (PROMPT = """...""")
+        ↓ extract (regex)
+    JSON 快取 (prompts/stageN_prompts.json)
+        ↓ load
+    UI session_state (即時編輯)
+        ↓ save_draft → JSON 草稿（不影響執行）
+        ↓ update_script → 寫回 .py（影響執行）
+
+  components:
+    - name: PromptManager
+      role: 後端核心類別
+      responsibilities:
+        - 從 .py 腳本提取 prompt（regex）
+        - 讀取/寫入 JSON 快取
+        - 將修改寫回 .py 腳本
+        - 自動備份（修改前）
+        - 列出/還原備份
+
+    - name: UI Prompt Editor (Streamlit)
+      role: 前端互動介面
+      responsibilities:
+        - 顯示各 stage 的 prompt（text_area 編輯器）
+        - 顯示字數、行數、是否已修改
+        - 暫存草稿（JSON）
+        - 載入草稿
+        - 更新到腳本
+        - 從腳本重新載入
+
+    - name: Version Manager
+      role: 輸出版本控制
+      responsibilities:
+        - 每次成功執行後自動快照輸出
+        - 管理 active version（追蹤哪個版本是當前使用的）
+        - 切換/刪除版本
+        - 最終組裝時可選擇各 stage 的特定版本
+
+# ============================================================================
+# 目錄結構
+# ============================================================================
+
+directory_structure:
+  description: |
+    以下為 prompt 管理相關的目錄結構。
+    {project_root} 是你的專案根目錄。
+  layout:
+    prompts/: "JSON 快取，每個 stage 一個檔案"
+    prompts/backups/: "自動備份（.json 和 .py），修改前自動建立"
+    prompts/drafts/: "UI 暫存草稿，不影響實際執行"
+    temp/versions/{YYYYMM}/stage{N}/: "輸出版本快照"
+    temp/active_versions_{YYYYMM}.json: "記錄各 stage 的主要版本 ID"
+  file_naming:
+    json_cache: "stage{N}_prompts.json"
+    draft: "stage{N}_{YYYYMMDD_HHMMSS}.json"
+    backup_json: "stage{N}_prompts_{YYYYMMDD_HHMMSS}.json"
+    backup_script: "{script_stem}_{YYYYMMDD_HHMMSS}.py"
+    version_snapshot: "v{YYYYMMDD_HHMMSS}.md"
+
+# ============================================================================
+# 共用資料格式化架構（Preview Consistency Pattern）
+# ============================================================================
+
+shared_formatters:
+  design_principle: |
+    ⭐ **核心理念**：預覽與實際執行使用相同的程式碼，確保 100% 一致性
+
+    問題背景：
+    - 實際執行：Stage 腳本有自己的資料格式化邏輯
+    - UI 預覽：UI 中重新實作相同的邏輯來生成預覽
+    - 結果：兩份代碼，容易不一致 ❌
+
+    解決方案：
+    - 創建共用資料格式化模組（utils/data_formatter.py）
+    - Stage 腳本和 UI 預覽都使用相同的函數
+    - 單一來源原則（Single Source of Truth）✅
+
+  architecture:
+    pattern: |
+      實際執行 Stage 腳本 ──┐
+                           ├──> 共用資料格式化模組 (utils/data_formatter.py)
+      UI 預覽功能 ────────┘
+
+  implementation:
+    step_1_create_shared_module:
+      file: "utils/data_formatter.py"
+      description: |
+        創建共用資料格式化模組，包含所有資料讀取和格式化邏輯。
+        每個函數對應一種資料格式化需求。
+
+      design_principles:
+        - "函數命名清晰（load_*, format_*, calculate_*）"
+        - "完整的 docstring（包含 Args, Returns, Used by）"
+        - "一致的錯誤處理"
+        - "單一職責原則"
+
+      example: |
+        ```python
+        # utils/data_formatter.py
+
+        def load_us_etf_data(excel_file, year, month):
+            """
+            從 Excel 讀取指定月份的數據，轉為 markdown 表格
+
+            Args:
+                excel_file: Path 或 str，Excel 檔案路徑
+                year: int, 年份
+                month: int, 月份
+
+            Returns:
+                str: 格式化的 markdown 表格，或錯誤訊息
+
+            Used by:
+                - scripts/stages/stage1_xxx.py
+                - ui_app.py (generate_dynamic_variables, Stage 1)
+            """
+            try:
+                df = pd.read_excel(excel_file, sheet_name=f"{year}年{month}月數據")
+                # 格式化邏輯...
+                return formatted_table
+            except Exception as e:
+                return f"\n[警告] 無法讀取數據: {str(e)}\n"
+        ```
+
+    step_2_refactor_stage_scripts:
+      description: |
+        重構 Stage 腳本，移除本地的格式化邏輯，改用共用函數。
+
+      before: |
+        ```python
+        # scripts/stages/stage1_xxx.py
+
+        def load_data(file, year, month):  # ❌ 重複的邏輯
+            df = pd.read_excel(file)
+            # ... 大量格式化邏輯 ...
+            return table
+
+        def main(year, month):
+            data = load_data(file, year, month)
+        ```
+
+      after: |
+        ```python
+        # scripts/stages/stage1_xxx.py
+
+        from utils.data_formatter import load_us_etf_data  # ✅ 使用共用函數
+
+        def main(year, month):
+            # 直接使用共用函數
+            data = load_us_etf_data(file, year, month)
+        ```
+
+    step_3_ui_preview_integration:
+      description: |
+        UI 預覽邏輯使用相同的共用函數，確保與實際執行一致。
+
+      before: |
+        ```python
+        # ui_app.py
+
+        def generate_dynamic_variables(stage_num, year, month):
+            if stage_num == 1:
+                # ❌ 自行實作，可能與實際執行不同
+                df = pd.read_excel(file)
+                table = df.to_markdown()  # 格式可能不同
+        ```
+
+      after: |
+        ```python
+        # ui_app.py
+
+        from utils.data_formatter import load_us_etf_data  # ✅ 使用相同的共用函數
+
+        def generate_dynamic_variables(stage_num, year, month):
+            if stage_num == 1:
+                # ✅ 使用共用函數，確保與實際執行相同
+                data = load_us_etf_data(file, year, month)
+                dynamic_vars["{{data}}"] = data
+        ```
+
+  benefits:
+    - "✅ 保證一致性：預覽與實際執行使用完全相同的代碼"
+    - "✅ 避免重複：單一來源原則（Single Source of Truth）"
+    - "✅ 易於維護：修改邏輯只需要改一處"
+    - "✅ 降低錯誤：減少因複製貼上導致的不一致"
+    - "✅ 易於測試：只需測試共用函數一次"
+
+  best_practices:
+    function_naming:
+      - "使用清晰的動詞 + 名詞：load_*, format_*, calculate_*"
+      - "名稱反映功能：load_us_etf_data 而非 get_data"
+
+    docstring_requirements: |
+      必須包含：
+      - 簡短描述
+      - Args: 所有參數及說明
+      - Returns: 返回值說明
+      - Used by: 使用者列表（幫助追蹤影響範圍）
+
+    error_handling:
+      pattern: |
+        try:
+            # 主邏輯
+            return formatted_data
+        except Exception as e:
+            # 統一的錯誤訊息格式
+            return f"\n[警告] 無法讀取 {source}: {str(e)}\n"
+
+    testing:
+      - "為共用函數撰寫單元測試"
+      - "測試預覽與實際執行的輸出一致性"
+      - "使用 pytest 或 unittest 框架"
+
+    version_control:
+      - "修改共用函數時確保向下兼容"
+      - "或同時更新所有使用者"
+      - "記錄修改原因（commit message）"
+
+  common_pitfalls:
+    - name: "部分使用共用函數"
+      problem: "某些 Stage 使用共用函數，某些自己實作"
+      solution: "所有格式化邏輯都使用共用函數"
+
+    - name: "修改共用函數後未更新所有使用者"
+      problem: "修改函數後忘記測試所有 Stage"
+      solution: "建立自動化測試，修改後自動驗證所有使用者"
+
+    - name: "在共用函數中混入特定 Stage 邏輯"
+      problem: "函數中使用 if stage_num == 1 等條件分支"
+      solution: "每個函數專注單一職責，Stage 特定邏輯在 Stage 腳本中處理"
+
+  verification:
+    method_1_direct_comparison:
+      description: "直接比對 Stage 執行輸出與 UI 預覽內容"
+      steps:
+        - "執行 Stage 腳本，生成輸出檔案"
+        - "在 UI 中查看預覽內容"
+        - "人工比對兩者是否一致"
+
+    method_2_unit_testing:
+      description: "使用單元測試驗證一致性"
+      example: |
+        ```python
+        def test_preview_matches_actual():
+            # 使用相同參數呼叫共用函數
+            actual = load_us_etf_data(test_file, 2025, 12)
+
+            # 模擬 UI 預覽邏輯
+            preview = generate_dynamic_variables(1, 2025, 12, "202512")
+
+            # 驗證一致性
+            assert preview["{{data}}"] in actual
+        ```
+
+    method_3_check_imports:
+      description: "檢查是否所有地方都使用共用函數"
+      commands:
+        - "grep -r 'def load_.*_data' scripts/stages/  # 應該只在 utils/data_formatter.py 中找到"
+        - "grep -r 'from utils.data_formatter import' scripts/stages/"
+        - "grep 'from utils.data_formatter import' ui_app.py"
+
+# ============================================================================
+# PromptManager 類別設計
+# ============================================================================
+
+prompt_manager_class:
+  description: |
+    核心後端類別，負責 prompt 的讀取、提取、儲存、寫回。
+    不依賴 Streamlit，可獨立使用。
+
+  constructor:
+    parameters: []
+    initialization:
+      - "推導 project_root（通常 Path(__file__).parent.parent）"
+      - "建立 prompts_dir 和 backup_dir"
+      - "定義 prompt_files 映射表：stage 名稱 → {json 路徑, 腳本路徑}"
+
+  prompt_files_mapping:
+    description: |
+      字典，key 為 stage 的人類可讀名稱，value 包含：
+      - file: JSON 快取路徑
+      - script: 對應的 Python 腳本路徑
+    example: |
+      self.prompt_files = {
+          "Stage 1：XXX": {
+              "file": self.prompts_dir / "stage1_prompts.json",
+              "script": self.project_root / "scripts" / "stages" / "stage1_xxx.py"
+          },
+          # ...依此類推
+      }
+
+  methods:
+    extract_prompts_from_script:
+      purpose: "從 Python 腳本中用 regex 提取 prompt 常數"
+      input: "script_path (Path)"
+      output: "dict[str, str]  # {變數名: prompt 內容}"
+      regex_patterns:
+        pattern_module_level_vars: |
+          # 匹配 PROMPT = """...""" 或 PROMPT_XXX = """..."""
+          r'(PROMPT(?:_\w+)?)\s*=\s*"""(.*?)"""'
+          # 使用 re.DOTALL 使 . 匹配換行
+        pattern_dict_format: |
+          # 匹配 PROMPTS = {"key": """...""", ...}
+          # 先找外層 dict，再提取各 key-value
+          外層: r'PROMPTS\s*=\s*\{(.*?)\n\}'
+          內層: r'"(\w+)":\s*"""(.*?)"""'
+      important_notes:
+        - "regex 必須用 re.DOTALL flag，因為 prompt 跨多行"
+        - "PROMPT(?:_\\w+)? 同時匹配 PROMPT 和 PROMPT_XXX"
+        - "無法提取動態 f-string prompt（如含有前置 stage 輸出的 prompt）"
+        - "對動態 prompt 的 stage，應在 UI 設 prompt_key=None 並顯示說明"
+
+    get_prompts:
+      purpose: "取得指定 stage 的所有 prompt"
+      logic: |
+        1. 如果 JSON 快取存在 → 從 JSON 讀取（優先）
+        2. 否則 → 從腳本 regex 提取
+        3. 提取成功後自動儲存 JSON 快取（下次加速）
+      input: "report_type (str) — prompt_files 的 key"
+      output: "dict[str, str]"
+
+    save_prompts:
+      purpose: "儲存 prompt 到 JSON 快取檔"
+      logic: |
+        1. 如果快取檔已存在且 create_backup=True → 複製為備份
+        2. 寫入新的 JSON
+      input: "report_type, prompts (dict), create_backup=True"
+
+    update_script_prompts:
+      purpose: "將修改後的 prompt 寫回 .py 腳本（影響實際執行）"
+      logic: |
+        1. 讀取腳本內容
+        2. 建立腳本備份（.py 備份到 backups/）
+        3. 偵測腳本格式：
+           a. module-level 變數 (PROMPT = """...""")
+           b. 字典格式 (PROMPTS = {"key": """..."""})
+        4. 用 regex 替換對應的 prompt 內容
+        5. 寫回腳本
+      important_notes:
+        - "偵測 regex 和提取 regex 必須一致（都要支援 PROMPT 和 PROMPT_XXX）"
+        - "替換前一定要備份，因為這是不可逆操作"
+        - "替換格式：{var_name} = \"\"\"\\n{new_content}\\n\"\"\""
+
+    list_backups:
+      purpose: "列出指定 stage 的所有備份"
+      output: "list[{file, time}]，按時間倒序"
+
+    restore_from_backup:
+      purpose: "從備份還原 JSON 快取"
+
+# ============================================================================
+# 腳本端 Prompt 寫法規範
+# ============================================================================
+
+script_prompt_conventions:
+  description: |
+    為了讓 PromptManager 能正確提取和替換，腳本中的 prompt 必須遵守以下規範。
+
+  supported_formats:
+    format_1_single_var:
+      description: "單一 prompt 的 stage"
+      example: |
+        PROMPT = """
+        你是一位專業的市場分析師...
+        請根據以下圖片分析...
+        """
+      variable_naming: "PROMPT"
+
+    format_2_multiple_vars:
+      description: "多個 prompt 的 stage（如一個 stage 有 2 次 API 呼叫）"
+      example: |
+        PROMPT_INFLOW = """
+        請分析以下淨流入 ETF 的表現...
+        """
+
+        PROMPT_OUTFLOW = """
+        請分析以下淨流出 ETF 的表現...
+        """
+      variable_naming: "PROMPT_{SECTION_NAME}，全大寫底線分隔"
+
+    format_3_dict:
+      description: "字典格式（較少用）"
+      example: |
+        PROMPTS = {
+            "section_1": """
+            第一段分析的 prompt...
+            """,
+            "section_2": """
+            第二段分析的 prompt...
+            """
+        }
+
+  unsupported:
+    dynamic_fstring:
+      description: |
+        含有動態資料的 f-string prompt（如嵌入前面 stage 的輸出）
+        無法被 regex 靜態提取。
+      example: |
+        prompt = f"""
+        根據以下內容：
+        {stage1_output}      # ← 動態資料，無法提取
+        請總結...
+        """
+      workaround: |
+        在 UI 的 STAGE_META 中設 prompt_key=None，
+        並顯示提示訊息引導使用者直接編輯腳本或查看原始碼。
+
+# ============================================================================
+# UI 整合設計（Streamlit）
+# ============================================================================
+
+ui_integration:
+  stage_config:
+    description: |
+      UI 用一個 STAGE_META 字典描述所有 stage 的配置，
+      用於自動生成各 stage 的管理頁面。
+    schema:
+      name: "str — stage 顯示名稱"
+      emoji: "str — 圖示"
+      api: "int — API 呼叫次數"
+      script: "str | None — 腳本路徑"
+      output_prefix: "str | None — 輸出檔名前綴"
+      images_in: "list[str] — 輸入圖片檔名（支援 {prefix} 替換）"
+      data_in: "list[str] — 輸入資料檔名（支援 {prefix} 替換）"
+      prompt_key: "str | None — 對應 PromptManager.prompt_files 的 key"
+
+  prompt_editor_ui:
+    layout: |
+      每個 stage 頁面有三個 tab：
+      1. 📥 輸入管理 — 圖片預覽、資料狀態、Prompt 編輯器
+      2. ▶️ 執行 — 執行按鈕 + 當前輸出預覽 + 腳本原始碼
+      3. 📜 版本記錄 — 輸出版本快照管理
+
+    prompt_section_components:
+      - name: "草稿記錄 expander"
+        description: "列出已存的草稿，可點載入"
+      - name: "各 Prompt 編輯器"
+        description: |
+          每個 prompt 變數一個 expander，內含：
+          - 字數/行數顯示
+          - 是否已修改的提示
+          - text_area 編輯器（可編輯）
+          - 👁️ 預覽 expander（變數替換後，唯讀）
+      - name: "Prompt 預覽功能（新增）"
+        description: |
+          在每個 Prompt 編輯器下方提供預覽功能：
+          - 自動替換靜態變數（如 {{YEAR}}, {{MONTH}}）
+          - 動態變數標記為 [執行時動態生成: {{xxx}}]
+          - 唯讀 text_area（disabled=True）
+          - 顯示替換後的字數和行數
+        implementation: |
+          def render_prompt_with_variables(prompt_text, year, month):
+              """替換 prompt 中的變數為實際值"""
+              prev = get_prev_prefix(year, month)
+              prev_year = int(prev[:4])
+              prev_month = int(prev[4:])
+
+              rendered = prompt_text
+              rendered = rendered.replace("{{YEAR}}", str(year))
+              rendered = rendered.replace("{{MONTH}}", str(month))
+              rendered = rendered.replace("{{PREV_YEAR}}", str(prev_year))
+              rendered = rendered.replace("{{PREV_MONTH}}", str(prev_month))
+
+              # 動態變數標記
+              dynamic_vars = ["{{data_comparison}}", "{{stage1_output}}", ...]
+              for var in dynamic_vars:
+                  if var in rendered:
+                      rendered = rendered.replace(var, f"[執行時動態生成: {var}]")
+
+              return rendered
+        benefits:
+          - "即時看到變數替換後的實際 prompt"
+          - "方便檢查變數是否正確"
+          - "清楚知道哪些是動態變數"
+          - "唯讀保護，避免誤編輯預覽內容"
+      - name: "操作按鈕列（3 欄）"
+        buttons:
+          - "💾 暫存草稿 — 存到 prompts/drafts/ JSON，不影響執行"
+          - "📤 更新到腳本 — 呼叫 update_script_prompts()，寫回 .py"
+          - "🔄 從腳本重新載入 — 清除 session_state，重新讀取"
+
+    session_state_keys:
+      prompt_editor: "pe_{stage_num}_{prompt_var_name}"
+
+  streamlit_code_patterns:
+    prompt_editor: |
+      def ui_prompts(stage_num, year=None, month=None):
+          meta = STAGE_META[stage_num]
+          if not meta["prompt_key"]:
+              return
+
+          pm = PromptManager()
+          base_prompts = pm.get_prompts(meta["prompt_key"])
+          if not base_prompts:
+              st.warning("找不到 Prompt")
+              return
+
+          # 草稿管理
+          drafts = get_drafts(stage_num)
+          if drafts:
+              with st.expander(f"草稿記錄（{len(drafts)} 個）"):
+                  for d in drafts[:10]:
+                      if st.button("載入", key=f"ld_{stage_num}_{d['id']}"):
+                          loaded = json.loads(Path(d["path"]).read_text(encoding='utf-8'))
+                          for pn, content in loaded.items():
+                              st.session_state[f"pe_{stage_num}_{pn}"] = content
+                          st.rerun()
+
+          # 編輯各 Prompt
+          for pname, default in base_prompts.items():
+              init = st.session_state.get(f"pe_{stage_num}_{pname}", default)
+              with st.expander(f"✏️ {pname}"):
+                  # 顯示字數、行數、修改狀態
+                  cc = st.columns(3)
+                  cc[0].caption(f"字數：{len(init)}")
+                  cc[1].caption(f"行數：{len(init.splitlines())}")
+                  if init != default:
+                      cc[2].caption("⚠️ 已修改")
+
+                  # 編輯器
+                  st.text_area("", init, height=250,
+                               key=f"pe_{stage_num}_{pname}",
+                               label_visibility="collapsed")
+
+                  # 預覽（變數替換後）
+                  if year and month:
+                      with st.expander(f"👁️ 預覽（變數替換後）", expanded=False):
+                          rendered = render_prompt_with_variables(init, year, month)
+                          st.text_area("", rendered, height=250,
+                                       key=f"preview_{stage_num}_{pname}",
+                                       label_visibility="collapsed",
+                                       disabled=True,
+                                       help="此為變數替換後的預覽，唯讀模式")
+                          st.caption(f"📊 替換後字數：{len(rendered)} | 行數：{len(rendered.splitlines())}")
+
+          # 三個按鈕
+          c1, c2, c3 = st.columns(3)
+          # 暫存草稿 → save_draft()
+          # 更新到腳本 → pm.update_script_prompts()
+          # 重新載入 → 清 session_state + st.rerun()
+
+# ============================================================================
+# 輸出版本管理
+# ============================================================================
+
+version_management:
+  description: |
+    每次成功執行 stage 後，自動快照輸出到版本目錄。
+    使用者可以切換主要版本、刪除版本、預覽內容。
+    最終組裝時可選擇各 stage 的特定版本。
+
+  storage:
+    snapshots: "temp/versions/{YYYYMM}/stage{N}/v{YYYYMMDD_HHMMSS}.md"
+    active_tracking: "temp/active_versions_{YYYYMM}.json"
+    active_json_format: |
+      {
+        "1": "v20260209_143022",
+        "2": "v20260209_143045",
+        ...
+      }
+
+  operations:
+    snapshot: "複製 temp/stage{N}_output_{prefix}.md → versions 目錄"
+    set_active: "更新 active_versions JSON"
+    apply_version: "從 versions 目錄複製回 temp/（供下游 stage 讀取）"
+    delete_version: "刪除快照檔 + 若為 active 則清除 active 記錄"
+
+  auto_snapshot_flow: |
+    執行 stage → 成功 → snapshot() → set_active_vid()
+    這確保每次成功執行都有版本記錄，且自動設為主要版本。
+
+  assembly_stage:
+    description: |
+      最終組裝 stage 的特殊 UI：
+      - 為每個前置 stage 提供 selectbox 選擇版本
+      - 「套用」按鈕：apply_version() 將選定版本複製到 temp/
+      - 然後執行組裝腳本讀取 temp/ 中的檔案
+
+# ============================================================================
+# 已知陷阱與解決方案
+# ============================================================================
+
+known_pitfalls:
+  - issue: "提取和寫回 regex 不一致"
+    description: |
+      extract_prompts_from_script 和 update_script_prompts 的偵測 regex 必須一致。
+      例如 extract 支援 PROMPT（無底線），但 update 的偵測只找 PROMPT_\w+，
+      會導致「看得到但寫不回」的假成功 bug。
+    solution: "兩處統一用 r'PROMPT(?:_\\w+)?' 同時匹配 PROMPT 和 PROMPT_XXX"
+
+  - issue: "動態 f-string prompt 無法提取"
+    description: |
+      含有 {variable} 的 f-string prompt 不是 module-level 常數，
+      regex 無法靜態提取，且也無法寫回。
+    solution: |
+      在 STAGE_META 設 prompt_key=None，
+      UI 顯示說明訊息引導使用者查看/編輯原始碼。
+
+  - issue: "JSON 快取可能過期"
+    description: |
+      如果使用者直接修改 .py 腳本（不透過 UI），
+      JSON 快取會與腳本不同步。
+    solution: |
+      提供「從腳本重新載入」按鈕，清除 session_state 和 JSON 快取。
+      也可以比較 .py 和 .json 的 mtime 自動偵測。
+
+  - issue: "Windows 編碼問題"
+    description: "subprocess 執行腳本時輸出含有非 ASCII 字元"
+    solution: |
+      subprocess.Popen 加上 encoding='utf-8', errors='replace'。
+      腳本頭部加 sys.stdout.reconfigure(encoding='utf-8', errors='replace')。
+
+  - issue: "Streamlit session_state 與 widget key 衝突"
+    description: |
+      text_area 的 key 和 session_state 預設值需要精心設計，
+      否則會出現「修改後切換 tab 就重置」的問題。
+    solution: |
+      用 st.session_state.get(key, default) 取得初始值，
+      再把 key 同時作為 text_area 的 key，讓 Streamlit 自動管理。
+
+# ============================================================================
+# 給 AI 的建構指引
+# ============================================================================
+
+ai_implementation_guide:
+  step_1_analyze_project:
+    description: |
+      先分析目標專案的結構：
+      - 有哪些 stage/step？
+      - 每個 stage 呼叫哪些 API？
+      - prompt 目前寫在哪裡？格式為何？
+      - 哪些 prompt 是靜態的？哪些是動態的？
+
+  step_2_standardize_prompts:
+    description: |
+      將各腳本的 prompt 統一為 module-level 常數：
+      - 單一 prompt 的 stage → PROMPT = """..."""
+      - 多 prompt 的 stage → PROMPT_SECTION_A = """..."""
+      - 動態 prompt → 保持原樣，但在 UI 標記為不可編輯
+
+  step_3_create_prompt_manager:
+    description: |
+      建立 PromptManager 類別：
+      - 定義 prompt_files 映射表
+      - 實作 extract / get / save / update 方法
+      - 實作 backup / restore 方法
+      - 確保 extract 和 update 的 regex 一致
+
+  step_4_integrate_ui:
+    description: |
+      在 Streamlit UI 中整合：
+      - 定義 STAGE_META 配置
+      - 建立 ui_prompts() 元件（含預覽功能）
+      - 建立 render_prompt_with_variables() 函數（變數替換）
+      - 建立草稿管理功能
+      - 建立版本管理功能
+      - 每個 stage 頁面整合輸入管理 + 執行 + 版本記錄
+      - 創建三種安全啟動腳本（安全/內網/開放模式）
+      - 配置 .streamlit/config.toml 安全選項
+
+  step_5_test:
+    description: |
+      測試要點：
+      - 從腳本提取 prompt → 編輯 → 儲存草稿 → 載入草稿
+      - 更新到腳本 → 確認 .py 檔案真的被修改
+      - 執行 stage → 確認用的是新 prompt
+      - 版本快照 → 切換版本 → 確認組裝使用正確版本
+
+# ============================================================================
+# 快速開始範例
+# ============================================================================
+
+quick_start_example:
+  description: |
+    以下是一個最小化的範例，展示如何使用此規格。
+    假設你有一個 3 階段的報告生成流程。
+
+  prompt_to_ai: |
+    我有一個報告生成專案，包含 3 個階段：
+
+    Stage 1: 數據摘要（1 個 API 呼叫）
+      - 腳本: scripts/stage1_summary.py
+      - Prompt 變數: PROMPT
+
+    Stage 2: 詳細分析（2 個 API 呼叫）
+      - 腳本: scripts/stage2_analysis.py
+      - Prompt 變數: PROMPT_SECTION_A, PROMPT_SECTION_B
+
+    Stage 3: 總結（1 個 API 呼叫）
+      - 腳本: scripts/stage3_conclusion.py
+      - Prompt 變數: PROMPT（動態，包含前面 stage 的輸出）
+
+    請根據以下規格為我建立 Prompt 管理系統：
+    [貼上此 YAML 全文]
+
+    請生成：
+    1. utils/prompt_manager.py（PromptManager 類別）
+    2. Streamlit UI 的 Prompt 編輯器組件（含預覽功能）
+    3. 版本管理相關函數
+    4. 三種安全啟動腳本（start_ui.bat, start_ui_network.bat, start_ui_public.bat）
+    5. .streamlit/config.toml 配置文件
+
+  expected_file_structure: |
+    project/
+    ├── scripts/
+    │   ├── stage1_summary.py        # PROMPT = """..."""
+    │   ├── stage2_analysis.py       # PROMPT_SECTION_A, PROMPT_SECTION_B
+    │   └── stage3_conclusion.py     # 動態 prompt
+    ├── utils/
+    │   └── prompt_manager.py        # AI 生成
+    ├── prompts/
+    │   ├── stage1_prompts.json      # 快取
+    │   ├── stage2_prompts.json
+    │   ├── backups/                 # 自動備份
+    │   └── drafts/                  # 草稿
+    ├── temp/
+    │   ├── versions/                # 版本快照
+    │   └── active_versions_*.json   # 主要版本追蹤
+    ├── .streamlit/
+    │   ├── config.toml              # Streamlit 安全配置
+    │   └── secrets.toml             # 密碼保護（可選）
+    ├── start_ui.bat                 # 🟢 安全模式啟動（推薦）
+    ├── start_ui_network.bat         # 🟡 內網模式啟動
+    ├── start_ui_public.bat          # 🔴 開放模式啟動（有警告）
+    └── ui_app.py                    # Streamlit UI
+
+# ============================================================================
+# 常見問題 FAQ
+# ============================================================================
+
+faq:
+  q1:
+    question: "這個系統和直接編輯 .py 文件有什麼差別？"
+    answer: |
+      直接編輯 .py：
+      - 需要重啟應用才能看到效果
+      - 沒有版本歷史（除非用 git）
+      - 無法快速 A/B 測試
+
+      使用此系統：
+      - UI 即時預覽和編輯
+      - 自動版本快照
+      - 草稿暫存（不影響執行）
+      - 可以比較不同版本的輸出結果
+
+  q2:
+    question: "為什麼不把 Prompt 存在資料庫？"
+    answer: |
+      設計原則是「Prompt 即程式碼」：
+      - Prompt 是業務邏輯的一部分，應該在版本控制（Git）中
+      - 資料庫會讓部署變複雜
+      - 純檔案系統更容易備份和遷移
+      - JSON 快取只是為了加速讀取，不是 single source of truth
+
+  q3:
+    question: "可以用於非 Streamlit 的專案嗎？"
+    answer: |
+      可以！PromptManager 類別不依賴 Streamlit。
+      你可以：
+      - 用 CLI 工具調用 PromptManager
+      - 整合到其他 Web 框架（Flask、FastAPI）
+      - 寫自己的編輯器 UI
+
+  q4:
+    question: "如何處理多語言 Prompt？"
+    answer: |
+      建議擴展為：
+      PROMPT_EN = """..."""
+      PROMPT_ZH = """..."""
+
+      然後在 PromptManager 加上語言參數。
+
+  q5:
+    question: "版本快照會不會佔用很多空間？"
+    answer: |
+      Markdown 文本檔案很小（通常 < 100KB）。
+      即使 100 個版本也只有 10MB。
+      建議定期清理舊版本（保留最近 20 個）。
+
+# ============================================================================
+# Streamlit 安全啟動配置
+# ============================================================================
+
+streamlit_security:
+  description: |
+    Streamlit 預設會監聽所有網路介面（0.0.0.0），這意味著：
+    - 會產生 Local、Network、External 三個 URL
+    - External URL 會暴露在公網，任何人都可訪問
+    - 如果沒有密碼保護，系統的所有功能都會被暴露
+
+    提供三種啟動模式，適應不同的使用場景和安全需求。
+
+  security_levels:
+    safe_mode:
+      name: "🟢 安全模式（推薦）"
+      description: "僅本機訪問，最安全"
+      script_name: "start_ui.bat"
+      config: |
+        # 監聽地址：localhost
+        python -W ignore -m streamlit run ui_app.py --server.address localhost --server.headless true 2>nul
+      features:
+        - "只有本機能訪問"
+        - "無 External URL 暴露"
+        - "資料不會外洩"
+        - "防止他人誤操作"
+      use_cases:
+        - "日常開發和使用"
+        - "包含敏感資料"
+        - "個人工作環境"
+
+    network_mode:
+      name: "🟡 區域網路模式"
+      description: "內網訪問，中等安全"
+      script_name: "start_ui_network.bat"
+      config: |
+        # 監聽地址：0.0.0.0（所有介面）
+        python -W ignore -m streamlit run ui_app.py --server.address 0.0.0.0 --server.headless true 2>nul
+      features:
+        - "同網路的設備可訪問"
+        - "有 Network URL（內網 IP）"
+        - "無 External URL（需路由器設定）"
+        - "同網路的人可執行所有操作"
+      use_cases:
+        - "手機/平板測試 UI"
+        - "內部團隊協作"
+        - "區域網路演示"
+      warnings:
+        - "確認當前網路是否可信"
+        - "不要在公共 Wi-Fi 使用"
+        - "使用完畢立即關閉"
+
+    public_mode:
+      name: "🔴 完全開放模式（高風險）"
+      description: "全世界可訪問，僅測試用"
+      script_name: "start_ui_public.bat"
+      config: |
+        # 監聽地址：0.0.0.0 + 顯示警告訊息
+        @echo off
+        echo 🚨 警告：完全開放模式 🚨
+        echo 任何知道你 IP 的人都能訪問系統
+        pause
+        python -W ignore -m streamlit run ui_app.py --server.address 0.0.0.0 --server.headless true 2>nul
+      features:
+        - "產生 External URL（公網 IP）"
+        - "全世界任何人都可訪問"
+        - "可執行腳本、查看資料、消耗 API"
+      use_cases:
+        - "短期測試（幾分鐘內）"
+        - "受控演示環境"
+      warnings:
+        - "極高安全風險"
+        - "不要長時間運行"
+        - "不要包含敏感資料"
+        - "建議設置密碼保護"
+
+  streamlit_config_file:
+    path: ".streamlit/config.toml"
+    description: "Streamlit 配置文件，設定安全選項"
+    example: |
+      [logger]
+      level = "error"
+      messageFormat = "%(asctime)s %(message)s"
+
+      [client]
+      showErrorDetails = false
+
+      [runner]
+      magicEnabled = true
+
+      [server]
+      # 安全設定：只允許本機訪問（禁用外部訪問）
+      address = "localhost"
+      port = 8501
+      headless = true
+
+      # 防止跨站請求偽造
+      enableCORS = false
+      enableXsrfProtection = true
+
+  startup_scripts:
+    description: "為不同安全模式創建對應的啟動腳本"
+    windows_batch_files:
+      safe_mode: |
+        @echo off
+        REM 啟動 Streamlit UI - 安全模式
+        echo ===================================
+        echo 系統啟動中...
+        echo 安全模式：僅本機訪問
+        echo ===================================
+        python -W ignore -m streamlit run ui_app.py --server.address localhost --server.headless true 2>nul
+
+      network_mode: |
+        @echo off
+        REM 啟動 Streamlit UI - 區域網路模式
+        echo ===================================
+        echo ⚠️ 警告：區域網路模式
+        echo 同網路的人都能訪問！
+        echo ===================================
+        python -W ignore -m streamlit run ui_app.py --server.address 0.0.0.0 --server.headless true 2>nul
+
+      public_mode: |
+        @echo off
+        REM 啟動 Streamlit UI - 完全開放模式
+        echo ========================================
+        echo  🚨 警告：完全開放模式 🚨
+        echo ========================================
+        echo.
+        echo 此模式將開放以下訪問方式：
+        echo   ✓ 本機訪問 (localhost)
+        echo   ✓ 區域網路訪問 (Network URL)
+        echo   ✓ 外部網路訪問 (External URL)
+        echo.
+        echo ⚠️  任何知道你 IP 的人都能訪問系統
+        echo ⚠️  可以執行腳本、查看資料、消耗 API
+        echo ⚠️  建議僅在測試或演示時使用
+        echo.
+        echo ========================================
+        pause
+        echo.
+        echo 正在啟動...
+        python -W ignore -m streamlit run ui_app.py --server.address 0.0.0.0 --server.headless true 2>nul
+
+    linux_shell_scripts:
+      safe_mode: |
+        #!/bin/bash
+        # 啟動 Streamlit UI - 安全模式
+        echo "==================================="
+        echo "系統啟動中..."
+        echo "安全模式：僅本機訪問"
+        echo "==================================="
+        python -W ignore -m streamlit run ui_app.py --server.address localhost --server.headless true 2>/dev/null
+
+      network_mode: |
+        #!/bin/bash
+        # 啟動 Streamlit UI - 區域網路模式
+        echo "==================================="
+        echo "⚠️  警告：區域網路模式"
+        echo "同網路的人都能訪問！"
+        echo "==================================="
+        python -W ignore -m streamlit run ui_app.py --server.address 0.0.0.0 --server.headless true 2>/dev/null
+
+  verification:
+    description: "如何驗證當前的安全模式"
+    terminal_check:
+      description: "檢查終端輸出的 URL"
+      safe_mode_output: |
+        ✅ Local URL: http://localhost:8501
+        (只有 1 個 URL，安全)
+
+      network_mode_output: |
+        ✅ Local URL:   http://localhost:8501
+        ⚠️ Network URL: http://192.168.1.100:8501
+        (2 個 URL，內網可訪問)
+
+      public_mode_output: |
+        ✅ Local URL:    http://localhost:8501
+        ⚠️ Network URL:  http://192.168.1.100:8501
+        🚨 External URL: http://27.247.35.9:8501  ← 危險！全世界可訪問
+        (3 個 URL，完全開放)
+
+    netstat_check:
+      description: "使用 netstat 命令檢查監聽狀態"
+      command: "netstat -ano | findstr :8501"
+      safe_mode_output: |
+        TCP    127.0.0.1:8501    0.0.0.0:0    LISTENING
+        (只監聽 localhost，安全)
+
+      public_mode_output: |
+        TCP    0.0.0.0:8501      0.0.0.0:0    LISTENING
+        (監聽所有 IP，開放)
+
+  best_practices:
+    - "預設使用安全模式（start_ui.bat）"
+    - "只在需要時才使用網路/開放模式"
+    - "使用完畢立即關閉（Ctrl+C）"
+    - "開放模式不要超過 10 分鐘"
+    - "如需遠端訪問，使用 Streamlit Cloud + 密碼保護或 VPN"
+    - "定期檢查 .env 是否在 .gitignore 中"
+    - "在 README 中說明安全啟動方式"
+
+  remote_access_alternatives:
+    description: "如果需要遠端訪問，不要使用開放模式，改用以下方案"
+    options:
+      - name: "Streamlit Cloud + 密碼保護"
+        description: "部署到 share.streamlit.io，設置密碼"
+        pros: ["免費", "HTTPS 加密", "24/7 運行", "內建認證"]
+        cons: ["資料在雲端", "免費版有資源限制"]
+
+      - name: "VPN 訪問"
+        description: "使用 Tailscale 或 ZeroTier"
+        pros: ["點對點加密", "只有授權設備可訪問", "免費（個人使用）"]
+        cons: ["需要安裝軟體", "稍微複雜"]
+
+      - name: "SSH 隧道"
+        description: "ssh -L 8501:localhost:8501 user@server"
+        pros: ["SSH 加密", "不需額外軟體", "適合臨時訪問"]
+        cons: ["需要 SSH 存取權", "連線斷開就無法訪問"]
+
+# ============================================================================
+# 授權與使用
+# ============================================================================
+
+license:
+  description: |
+    本規格文檔可自由使用於任何專案（商業或非商業）。
+
+    建議在使用時：
+    1. 根據你的專案需求調整細節
+    2. 保留核心設計原則
+    3. 如果對規格有改進建議，歡迎回饋
+
+  attribution: |
+    基於「台美 ETF 淨流量分析月報」專案的實踐經驗編寫。
