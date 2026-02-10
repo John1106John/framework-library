@@ -18,6 +18,19 @@
 # 🔖 版本：v1.0 (2026-02-09)
 # ============================================================================
 
+metadata:
+  name: "Prompt Management System"
+  version: "1.0.0"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、預覽一致性"
+  author: "John1106John"
+  created_at: "2026-02-09"
+  updated_at: "2026-02-10"
+  license: "MIT"
+  compatibility:
+    - "多階段 AI Workflow"
+    - "Streamlit UI"
+    - "任何 Python 3.10+ 專案"
+
 system_overview:
   name: "AI Workflow Prompt Management System"
   purpose: |
@@ -1045,6 +1058,51 @@ streamlit_security:
         description: "ssh -L 8501:localhost:8501 user@server"
         pros: ["SSH 加密", "不需額外軟體", "適合臨時訪問"]
         cons: ["需要 SSH 存取權", "連線斷開就無法訪問"]
+
+# ============================================================================
+# 整合指南
+# ============================================================================
+
+integration_guide:
+  prerequisites:
+    python_version: ">=3.10"
+    required_packages:
+      - streamlit
+      - pathlib (標準庫)
+      - json (標準庫)
+      - shutil (標準庫)
+      - re (標準庫)
+      - datetime (標準庫)
+
+  quick_start:
+    description: "快速整合 Prompt 管理系統到現有專案"
+    steps:
+      - "建立 utils/prompt_manager.py 模組"
+      - "建立 utils/data_formatter.py 共用資料格式化模組"
+      - "建立 prompts/ 目錄結構"
+      - "掃描 Stage 腳本提取 PROMPT 常數"
+      - "整合到 Streamlit UI（或建立新 UI）"
+      - "（可選）整合版本管理功能"
+
+  integration_methods:
+    - name: "完整整合"
+      description: "適合多階段 AI Workflow 專案"
+      includes: ["PromptManager", "VersionManager", "Streamlit UI", "共用資料格式化"]
+
+    - name: "基礎整合"
+      description: "只需要 Prompt 編輯功能"
+      includes: ["PromptManager", "Streamlit UI"]
+
+    - name: "最小整合"
+      description: "只需要 Prompt 提取和管理"
+      includes: ["PromptManager"]
+
+  detailed_instructions:
+    description: "詳細整合步驟請參考 AI_INTEGRATION_PROMPT.md"
+    files:
+      - "AI_INTEGRATION_PROMPT.md - 可直接複製給 AI 的完整整合指令"
+      - "README.md - 給人類閱讀的使用文檔"
+      - "README_PROMPT_SPEC.md - 完整規格說明"
 
 # ============================================================================
 # 授權與使用

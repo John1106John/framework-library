@@ -6,14 +6,17 @@ metadata:
   name: "API Configuration & Key Rotation Framework"
   version: "1.0.0"
   description: "集中式 API 設定與自動循環金鑰輪替框架，可快速整合到任何 Python 專案"
-  author: "ETF Flow Article Project"
+  author: "John1106John"
+  created_at: "2026-02-10"
+  updated_at: "2026-02-10"
   license: "MIT"
   compatibility:
     - "Google Gemini API"
     - "OpenAI API (可擴展)"
     - "Anthropic Claude API (可擴展)"
 
-overview:
+system_overview:
+  name: "API Configuration & Key Rotation Framework"
   purpose: |
     提供一個可重用的框架，用於管理 AI API 的集中式設定與自動金鑰輪替。
     解決多專案中重複實作 API 管理邏輯的問題。
@@ -32,7 +35,30 @@ overview:
     cycle_retry: "循環重試機制，最大化金鑰利用率"
     easy_integration: "3 個檔案即可整合到任何專案"
 
+  tech_stack:
+    language: Python 3.8+
+    storage: "純檔案系統（YAML + 環境變數），無需資料庫"
+    dependencies:
+      - pyyaml         # YAML 設定檔解析
+      - python-dotenv  # 環境變數載入
+      - google-generativeai  # Google Gemini API（或其他 API SDK）
+
 architecture:
+  design_principle: |
+    「設定與程式碼分離」— 所有可變參數（模型名稱、延遲時間等）集中在 config.yaml，
+    API 金鑰存放在 .env 環境變數中，程式碼本身不包含任何硬編碼配置。
+
+    金鑰輪替流程：
+    key1 → 配額錯誤 → 切換到 key2 → 配額錯誤 → 切換到 key3 → ... → 回到 key1
+    ↑                                                                    ↓
+    └────────────── 循環檢測（記錄起始索引，避免無限循環） ──────────────┘
+
+    設計原則：
+    1. Single Source of Truth：config.yaml 是所有設定的唯一來源
+    2. 環境變數安全：金鑰不寫入 config.yaml，使用 .env 管理
+    3. 快取優化：lru_cache 減少重複讀取設定檔
+    4. 自動備援：配額耗盡自動切換金鑰，最大化可用性
+    5. 詳細日誌：記錄所有 API 呼叫和金鑰切換，便於追蹤和除錯
   components:
     config_yaml:
       file: "config.yaml"
@@ -90,6 +116,27 @@ architecture:
       security:
         - "必須加入 .gitignore"
         - "提供 .env.example 作為模板"
+
+directory_structure:
+  description: |
+    以下為 API 設定與金鑰管理框架的標準目錄結構。
+    {project_root} 是你的專案根目錄。
+  layout:
+    config.yaml: "集中式設定檔（專案根目錄）"
+    .env: "環境變數設定檔（API 金鑰）"
+    .env.example: "環境變數範例檔（提交到 Git）"
+    utils/: "工具模組目錄"
+    utils/__init__.py: "Python 套件標記檔案"
+    utils/config.py: "設定檔讀取工具"
+    utils/api/: "API 相關模組目錄"
+    utils/api/__init__.py: "Python 套件標記檔案"
+    utils/api/api_manager.py: "API 金鑰管理器"
+    utils/api/logs/: "API 日誌目錄（自動建立）"
+    utils/api/logs/api_YYYYMMDD.log: "按日期的 API 呼叫日誌"
+  file_naming:
+    config: "config.yaml（固定名稱）"
+    env: ".env（固定名稱，必須在 .gitignore 中）"
+    log: "api_YYYYMMDD.log（按日期命名）"
 
 integration_guide:
   prerequisites:
