@@ -152,11 +152,24 @@ cd your-project
 
 ## 📚 相關資源
 
-### 文檔
+### 📖 完整文檔
 
-- [框架設計指南](https://github.com/John1106John/etfflow-article/blob/main/FRAMEWORK_LIBRARY_SETUP.md)
-- [Skills 使用指南](https://github.com/John1106John/etfflow-article/blob/main/SKILLS_GUIDE.md)
-- [Claude Code Skills](https://github.com/anthropics/claude-code)
+- **[Skills 使用指南](SKILLS_GUIDE.md)** - framework-architect 和 framework-integrator 的完整使用教學
+  - 🚀 完整工作流程（GitHub + 本地）
+  - 💡 實用技巧和最佳實踐
+  - 📋 範例和常見問題
+
+- **[架構庫設置指南](FRAMEWORK_LIBRARY_SETUP.md)** - 如何建立和管理 GitHub 架構庫
+  - 🏗️ 目錄結構規範
+  - 📝 FRAMEWORKS.json 格式
+  - ✅ 標準化檢查清單
+
+- **[格式驗證工具](validate_framework.py)** - 自動驗證架構格式
+  ```bash
+  python validate_framework.py  # 驗證所有架構
+  ```
+
+- [Claude Code Skills 官方文檔](https://github.com/anthropics/claude-code)
 
 ### Skills
 
