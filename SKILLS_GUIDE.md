@@ -1,6 +1,6 @@
 # Claude Code Skills 使用指南
 
-> 🛠️ 本專案已配置兩個自訂 skills，用於架構設計與整合
+> 🛠️ 本專案已配置三個自訂 skills，用於架構設計、管理與整合
 
 ---
 
@@ -29,11 +29,56 @@
 - ✅ 希望讓 AI 理解並幫您整合到其他專案
 - ✅ 需要標準化的架構規格文檔
 
-**範例輸出：** 參考本專案的 `api_config_framework/` 和 `prompt_management_spec/`
+**範例輸出：** 參考本專案的 `frameworks/api_config_framework/` 和 `frameworks/prompt_management_framework/`
 
 ---
 
-### 2. framework-integrator - 架構自動整合工具
+### 2. framework-manager - 架構庫管理工具
+
+**用途：** 管理 GitHub 架構庫：編輯、同步、驗證、刪除架構規格
+
+**安裝位置：** `~/.claude/skills/framework-manager.md`
+
+**呼叫方式：**
+```bash
+# 互動式主選單
+/framework-manager
+
+# 快捷用法
+/framework-manager edit              # 直接進入編輯模式
+/framework-manager sync              # 直接同步 GitHub
+/framework-manager validate          # 直接驗證格式
+/framework-manager status            # 直接查看狀態
+/framework-manager edit prompt-management  # 編輯特定架構
+```
+
+**功能：**
+- 📋 列出所有架構及其狀態
+- ✏️ 編輯現有架構的規格、文檔或整合指令
+- 🔄 同步 GitHub（Pull / Push / Clone）
+- ✅ 驗證架構格式是否符合標準
+- 🗑️ 刪除架構
+- 📊 查看本地與遠端的差異
+- ⚙️ 管理設定（路徑、URL、分支）
+
+**使用場景：**
+- ✅ 想編輯架構庫中已有的架構規格
+- ✅ 需要將本地修改推送到 GitHub
+- ✅ 想從 GitHub 拉取最新版本到本地
+- ✅ 需要驗證架構格式
+
+**與其他 Skills 的關係：**
+```
+/framework-architect  ──建立──→  架構規格
+                                    ↓
+/framework-manager   ──管理──→  架構庫（GitHub）
+                                    ↓
+/framework-integrator ──下載──→  整合到專案
+```
+
+---
+
+### 3. framework-integrator - 架構自動整合工具
 
 **用途：** 自動讀取架構規格並整合到當前專案
 
@@ -73,6 +118,13 @@
 ## 🚀 完整工作流程
 
 ### 場景 1：設計新架構並上傳到 GitHub（推薦）⭐
+
+#### 步驟 0：（可選）先查看架構庫狀態
+
+```bash
+/framework-manager status
+# 了解當前架構庫有哪些架構
+```
 
 #### 步驟 1：在源專案中設計架構規格
 
@@ -142,6 +194,24 @@ AI 會：
 
 ---
 
+### 場景 1.5：編輯已有的架構
+
+```bash
+# 使用 framework-manager 編輯架構
+/framework-manager edit
+
+# 或直接指定架構
+/framework-manager edit prompt-management
+
+# 流程：
+# 1. 選擇架構 → 選擇檔案
+# 2. AI 讀取並顯示結構摘要
+# 3. 描述修改 → AI 執行修改
+# 4. 確認 → 自動驗證 → 推送到 GitHub
+```
+
+---
+
 ### 場景 2：本地開發和測試（不上傳 GitHub）
 
 #### 步驟 1：設計架構規格
@@ -178,27 +248,20 @@ cd target_project
 
 ---
 
-### 場景 2：使用本專案的架構框架
+### 場景 3：使用本架構庫中的框架
 
-本專案已經包含兩個完整的架構規格：
+本架構庫包含兩個完整的架構規格：
 
-#### 2.1 API 設定與金鑰管理框架
+#### 3.1 API 設定與金鑰管理框架
 
-**位置：** `api_config_framework/`
+**位置：** `frameworks/api_config_framework/`
 
 **快速整合到新專案：**
 
 ```bash
-# 方法 1：使用 framework-integrator（推薦）
+# 推薦：使用 framework-integrator 從 GitHub 直接下載
 cd /path/to/new_project
-cp -r /path/to/etfflow_article/api_config_framework .
-/framework-integrator api_config_framework/api_config_framework_spec.yaml
-
-# 方法 2：手動複製整合指令給 AI
-# 打開 api_config_framework/AI_INTEGRATION_PROMPT.md
-# 複製「完整整合指令」
-# 填入新專案資訊
-# 提供給 Claude/ChatGPT
+/framework-integrator --github api-config-framework
 ```
 
 **核心功能：**
@@ -207,16 +270,15 @@ cp -r /path/to/etfflow_article/api_config_framework .
 - ✅ 配額智慧檢測與切換
 - ✅ 詳細日誌追蹤
 
-#### 2.2 Prompt 管理系統
+#### 3.2 Prompt 管理系統
 
-**位置：** `prompt_management_spec/`
+**位置：** `frameworks/prompt_management_framework/`
 
 **快速整合到新專案：**
 
 ```bash
 cd /path/to/new_project
-cp -r /path/to/etfflow_article/prompt_management_spec .
-/framework-integrator prompt_management_spec/prompt_management_system_spec.yaml
+/framework-integrator --github prompt-management
 ```
 
 **核心功能：**
@@ -236,6 +298,7 @@ cp -r /path/to/etfflow_article/prompt_management_spec .
 ```bash
 # 查看 skill 的完整文檔
 cat ~/.claude/skills/framework-architect.md
+cat ~/.claude/skills/framework-manager.md
 cat ~/.claude/skills/framework-integrator.md
 ```
 
@@ -252,6 +315,7 @@ ls -la ~/.claude/skills/
 ```bash
 cd /path/to/any_project
 /framework-architect    # ✅ 可用
+/framework-manager      # ✅ 可用
 /framework-integrator   # ✅ 可用
 ```
 
@@ -267,33 +331,27 @@ cd template_project
 
 # 3. 在新專案中使用
 cd new_project
-cp -r ../template_project/my_template_framework .
-/framework-integrator
+/framework-integrator --github my-template
 ```
 
 ---
 
 ## 📚 學習資源
 
-### 範例 1：本專案的 API 框架
+### 範例 1：API 設定框架
 
 查看完整實作範例：
-- **規格文檔：** `api_config_framework/api_config_framework_spec.yaml`
-- **整合指令：** `api_config_framework/AI_INTEGRATION_PROMPT.md`
-- **使用文檔：** `api_config_framework/README.md`
-- **程式碼範例：** `api_config_framework/examples/integration_example.py`
+- **規格文檔：** `frameworks/api_config_framework/api_config_framework_spec.yaml`
+- **整合指令：** `frameworks/api_config_framework/AI_INTEGRATION_PROMPT.md`
+- **使用文檔：** `frameworks/api_config_framework/README.md`
+- **程式碼範例：** `frameworks/api_config_framework/examples/integration_example.py`
 
 ### 範例 2：Prompt 管理系統
 
 查看完整實作範例：
-- **規格文檔：** `prompt_management_spec/prompt_management_system_spec.yaml`
-- **使用指南：** `prompt_management_spec/README_PROMPT_SPEC.md`
-
-### 實際應用
-
-本專案就是使用這些架構構建的：
-- **API 管理：** 使用 API 配置框架（`utils/api/gemini_api_utils.py` + `config.yaml`）
-- **Prompt 管理：** 使用 Prompt 管理系統（`utils/prompt_manager.py` + UI）
+- **規格文檔：** `frameworks/prompt_management_framework/prompt_management_system_spec.yaml`
+- **整合指令：** `frameworks/prompt_management_framework/AI_INTEGRATION_PROMPT.md`
+- **使用指南：** `frameworks/prompt_management_framework/README.md`
 
 ---
 
@@ -364,9 +422,10 @@ cp framework-architect.md ~/.claude/skills/
 
 - **Skills（在 ~/.claude/skills/）**：工具，定義「如何」操作
   - `framework-architect`：如何設計規格
+  - `framework-manager`：如何管理架構庫
   - `framework-integrator`：如何整合架構
 
-- **規格文檔（在專案中）**：內容，描述「什麼」架構
+- **規格文檔（在架構庫中）**：內容，描述「什麼」架構
   - `api_config_framework_spec.yaml`：API 框架的內容
   - `prompt_management_system_spec.yaml`：Prompt 系統的內容
 
@@ -394,11 +453,11 @@ Skills 只是讓流程更自動化、更方便。
 ```
 1. 在專案中開發架構
    ↓
-2. 使用 /framework-architect 建立規格
+2. 使用 /framework-architect 建立規格並上傳 GitHub
    ↓
-3. 將規格目錄提交到 Git
+3. 使用 /framework-manager 管理和編輯架構庫
    ↓
-4. 其他專案可以複製規格並使用 /framework-integrator 整合
+4. 其他專案使用 /framework-integrator 從 GitHub 下載並整合
 ```
 
 ### 2. 版本管理
@@ -412,17 +471,20 @@ last_updated: "2026-02-10"
 
 ### 3. 文檔結構
 
-建議的專案結構：
+建議的架構庫結構：
 ```
-project/
-├── src/                        # 專案程式碼
-├── my_framework/               # 可重用的架構規格
-│   ├── my_framework_spec.yaml
-│   ├── AI_INTEGRATION_PROMPT.md
-│   ├── README.md
-│   ├── templates/              # 模板檔案
-│   └── examples/               # 範例程式碼
-└── SKILLS_GUIDE.md            # 本檔案（說明如何使用 skills）
+framework-library/
+├── FRAMEWORKS.json            # 架構索引
+├── README.md                  # 架構庫說明
+├── SKILLS_GUIDE.md            # Skills 使用指南（本檔案）
+├── validate_framework.py      # 格式驗證工具
+└── frameworks/
+    └── my_framework/          # 每個架構一個資料夾
+        ├── my_framework_spec.yaml
+        ├── AI_INTEGRATION_PROMPT.md
+        ├── README.md
+        ├── templates/         # 模板檔案（可選）
+        └── examples/          # 範例程式碼（可選）
 ```
 
 ---
@@ -433,10 +495,10 @@ project/
 
 ```bash
 # 方法 1：直接閱讀
-cat ~/.claude/skills/framework-architect.md
+cat ~/.claude/skills/framework-manager.md
 
 # 方法 2：在對話中詢問
-"請說明 framework-architect skill 的使用方式"
+"請說明 framework-manager skill 的使用方式"
 ```
 
 ### 問題回報
@@ -453,33 +515,30 @@ cat ~/.claude/skills/framework-architect.md
 ### 快速開始檢查清單
 
 - [ ] 確認 skills 已安裝：`ls ~/.claude/skills/`
-- [ ] 查看範例規格：`api_config_framework/` 和 `prompt_management_spec/`
-- [ ] 嘗試呼叫：`/framework-architect`
-- [ ] 閱讀完整文檔：`framework-architect.md` 和 `framework-integrator.md`
+- [ ] 查看架構庫狀態：`/framework-manager status`
+- [ ] 瀏覽範例規格：`frameworks/` 目錄
+- [ ] 閱讀完整文檔：三個 skill 的 `.md` 檔案
 
 ### 第一次使用
 
-建議從整合現成的架構開始：
+建議從查看架構庫狀態開始：
 
 ```bash
-# 1. 進入任何測試專案
-cd /path/to/test_project
+# 1. 查看架構庫有哪些架構
+/framework-manager status
 
-# 2. 複製 API 框架規格
-cp -r /path/to/etfflow_article/api_config_framework .
-
-# 3. 執行整合
+# 2. 在任何專案中整合架構
+cd /path/to/your_project
 /framework-integrator
-
-# 4. 查看結果
+# 選擇「從 GitHub 架構庫選擇」
 ```
 
 這樣可以快速了解整個流程！
 
 ---
 
-**版本：** 1.0
-**最後更新：** 2026-02-10
+**版本：** 1.1
+**最後更新：** 2026-02-11
 **相關文件：**
-- [API 設定框架](api_config_framework/README.md)
-- [Prompt 管理系統](prompt_management_spec/README_PROMPT_SPEC.md)
+- [API 設定框架](frameworks/api_config_framework/README.md)
+- [Prompt 管理系統](frameworks/prompt_management_framework/README.md)
