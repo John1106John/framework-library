@@ -20,11 +20,11 @@
 
 metadata:
   name: "Prompt Management System"
-  version: "1.0.0"
+  version: "1.1.0"
   description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、預覽一致性"
   author: "John1106John"
   created_at: "2026-02-09"
-  updated_at: "2026-02-10"
+  updated_at: "2026-02-11"
   license: "MIT"
   compatibility:
     - "多階段 AI Workflow"
@@ -118,7 +118,9 @@ directory_structure:
     draft: "stage{N}_{YYYYMMDD_HHMMSS}.json"
     backup_json: "stage{N}_prompts_{YYYYMMDD_HHMMSS}.json"
     backup_script: "{script_stem}_{YYYYMMDD_HHMMSS}.py"
-    version_snapshot: "v{YYYYMMDD_HHMMSS}.md"
+    version_snapshot:
+      individual: "v{YYYYMMDD_HHMMSS}.md"
+      workflow: "v{YYYYMMDD_HHMMSS}_workflow.md"
 
 # ============================================================================
 # 共用資料格式化架構（Preview Consistency Pattern）
@@ -613,24 +615,47 @@ version_management:
     最終組裝時可選擇各 stage 的特定版本。
 
   storage:
-    snapshots: "temp/versions/{YYYYMM}/stage{N}/v{YYYYMMDD_HHMMSS}.md"
+    snapshots: "temp/versions/{YYYYMM}/stage{N}/v{YYYYMMDD_HHMMSS}[_{tag}].md"
+    snapshot_patterns:
+      individual_run: "v20260211_143022.md"          # 個別執行 stage
+      workflow_run: "v20260211_143022_workflow.md"   # 完整 workflow 執行
     active_tracking: "temp/active_versions_{YYYYMM}.json"
     active_json_format: |
       {
         "1": "v20260209_143022",
-        "2": "v20260209_143045",
+        "2": "v20260209_143045_workflow",
         ...
       }
 
   operations:
-    snapshot: "複製 temp/stage{N}_output_{prefix}.md → versions 目錄"
+    snapshot:
+      signature: "snapshot(stage_num, prefix, tag=None)"
+      description: "複製 temp/stage{N}_output_{prefix}.md → versions 目錄"
+      tag_parameter: |
+        可選的 tag 參數用於區分產出來源：
+        - tag=None（預設）：個別執行 stage → v{timestamp}.md
+        - tag="workflow"：完整 workflow 執行 → v{timestamp}_workflow.md
+        這樣使用者可以一眼區分哪些版本是單獨執行產生，哪些是完整流程產生
     set_active: "更新 active_versions JSON"
     apply_version: "從 versions 目錄複製回 temp/（供下游 stage 讀取）"
     delete_version: "刪除快照檔 + 若為 active 則清除 active 記錄"
 
-  auto_snapshot_flow: |
-    執行 stage → 成功 → snapshot() → set_active_vid()
-    這確保每次成功執行都有版本記錄，且自動設為主要版本。
+  auto_snapshot_flow:
+    individual_stage: |
+      執行單一 stage → 成功 → snapshot(stage_num, prefix) → set_active_vid()
+      產生檔名：v20260211_143022.md
+
+    complete_workflow: |
+      執行完整 workflow → 成功 → 對所有 stage 批次執行：
+        for sn in range(1, 8):
+          snapshot(sn, prefix, tag="workflow")
+          set_active_vid(sn, prefix, vid)
+      產生檔名：v20260211_143022_workflow.md（所有 stage 使用相同時間戳）
+
+    benefit: |
+      兩種執行模式產生不同的檔名格式，使用者可輕易區分：
+      - 無後綴版本：單獨測試/調整某個 stage
+      - _workflow 版本：完整流程一次跑完，確保各 stage 間的一致性
 
   assembly_stage:
     description: |
