@@ -20,11 +20,11 @@
 
 metadata:
   name: "Prompt Management System"
-  version: "1.1.0"
-  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、預覽一致性"
+  version: "1.2.0"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、預覽執行一致性"
   author: "John1106John"
   created_at: "2026-02-09"
-  updated_at: "2026-02-11"
+  updated_at: "2026-02-13"
   license: "MIT"
   compatibility:
     - "多階段 AI Workflow"
@@ -60,23 +60,31 @@ system_overview:
 architecture:
   design_principle: |
     「Prompt 即程式碼」— prompt 直接寫在 .py 腳本中作為 module-level 常數，
-    是 single source of truth。JSON 快取和草稿只是輔助層。
+    是 single source of truth。
+
+    ⭐ 核心原則：腳本即唯一來源
+    - get_prompts() 永遠從 .py 腳本提取（regex），不優先讀取 JSON 快取
+    - 避免 JSON 快取與腳本不同步的 bug
+    - JSON 快取僅用於草稿暫存，不作為讀取來源
 
     資料流：
     .py 腳本 (PROMPT = """...""")
-        ↓ extract (regex)
-    JSON 快取 (prompts/stageN_prompts.json)
-        ↓ load
+        ↓ extract (regex) ← get_prompts() 永遠走這條路
     UI session_state (即時編輯)
         ↓ save_draft → JSON 草稿（不影響執行）
         ↓ update_script → 寫回 .py（影響執行）
+
+    ⭐ 預覽與執行共用邏輯（build_prompts 模式）：
+    .py 腳本中的 build_prompts(year, month, prompt_texts=None)
+        ↑ 腳本 main() 呼叫（prompt_texts=None，用 module-level 常數）
+        ↑ UI 預覽呼叫（prompt_texts=edited_dict，用 UI 編輯中的文字）
+    → 確保預覽與執行 100% 使用相同的組裝邏輯
 
   components:
     - name: PromptManager
       role: 後端核心類別
       responsibilities:
-        - 從 .py 腳本提取 prompt（regex）
-        - 讀取/寫入 JSON 快取
+        - 從 .py 腳本提取 prompt（regex）— 唯一讀取來源
         - 將修改寫回 .py 腳本
         - 自動備份（修改前）
         - 列出/還原備份
@@ -378,11 +386,24 @@ prompt_manager_class:
     get_prompts:
       purpose: "取得指定 stage 的所有 prompt"
       logic: |
-        1. 如果 JSON 快取存在 → 從 JSON 讀取（優先）
-        2. 否則 → 從腳本 regex 提取
-        3. 提取成功後自動儲存 JSON 快取（下次加速）
+        ⭐ 永遠從腳本提取（不使用 JSON 快取），確保與執行一致：
+        1. 確認 report_type 存在於 prompt_files 映射表
+        2. 取得對應的 script 路徑
+        3. 呼叫 extract_prompts_from_script(script_path) 提取
+        4. 直接回傳結果（不寫入 JSON 快取）
       input: "report_type (str) — prompt_files 的 key"
       output: "dict[str, str]"
+      important_notes:
+        - "⚠️ 舊版設計會優先從 JSON 快取讀取，導致更新腳本後 UI 仍顯示舊版 prompt"
+        - "新版永遠從 .py 腳本提取，徹底消除快取不同步問題"
+        - "效能影響極小（regex 提取只需幾毫秒）"
+      example: |
+        def get_prompts(self, report_type):
+            """獲取指定報告類型的 Prompts（直接從腳本提取，確保與執行一致）"""
+            if report_type not in self.prompt_files:
+                return {}
+            script_file = self.prompt_files[report_type]["script"]
+            return self.extract_prompts_from_script(script_file)
 
     save_prompts:
       purpose: "儲存 prompt 到 JSON 快取檔"
@@ -401,10 +422,12 @@ prompt_manager_class:
            b. 字典格式 (PROMPTS = {"key": """..."""})
         4. 用 regex 替換對應的 prompt 內容
         5. 寫回腳本
+        ⭐ 不需要同步 JSON 快取 — 因為 get_prompts() 永遠從腳本提取
       important_notes:
         - "偵測 regex 和提取 regex 必須一致（都要支援 PROMPT 和 PROMPT_XXX）"
         - "替換前一定要備份，因為這是不可逆操作"
         - "替換格式：{var_name} = \"\"\"\\n{new_content}\\n\"\"\""
+        - "⚠️ 不要在此方法中加 save_prompts() 同步 JSON — 多餘且可能造成混淆"
 
     list_backups:
       purpose: "列出指定 stage 的所有備份"
@@ -461,14 +484,241 @@ script_prompt_conventions:
         含有動態資料的 f-string prompt（如嵌入前面 stage 的輸出）
         無法被 regex 靜態提取。
       example: |
+        # ❌ 舊寫法（無法提取）
         prompt = f"""
         根據以下內容：
         {stage1_output}      # ← 動態資料，無法提取
         請總結...
         """
       workaround: |
-        在 UI 的 STAGE_META 中設 prompt_key=None，
-        並顯示提示訊息引導使用者直接編輯腳本或查看原始碼。
+        ⭐ 推薦做法：將 f-string 轉換為模板常數 + {{variable}} 佔位符
+
+        # ✅ 新寫法（可提取 + 可編輯）
+        PROMPT_ABSTRACT = """
+        根據以下內容：
+        {{stage1_output}}
+        請總結...
+        """
+
+        然後在 build_prompts() 中用 .replace("{{stage1_output}}", actual_data) 替換。
+        這樣 PromptManager 可以正常提取和寫回，UI 也能編輯。
+
+        對於依賴前序 API 結果的變數（如 {{us_conclusion}}），
+        在 build_prompts() 中標記為 [需要前序 API 結果]，
+        然後在 main() 中用實際 API 結果替換。
+
+      migration_guide: |
+        f-string → 模板常數的轉換步驟：
+        1. 將 f"..." 改為 """..."""（移除 f 前綴）
+        2. 將 {variable} 改為 {{variable}}
+        3. 在 build_prompts() 中用 .replace() 替換變數
+        4. 依賴前序 API 結果的變數，暫時標記為 [需要前序 API 結果]
+        5. 在 main() 中用實際結果替換
+
+# ============================================================================
+# build_prompts() 共用函數模式（Shared Prompt Assembly）
+# ============================================================================
+
+build_prompts_pattern:
+  design_principle: |
+    ⭐ **核心理念**：每個 Stage 腳本提供一個 build_prompts() 函數，
+    封裝完整的 prompt 組裝邏輯（變數替換 + 資料載入）。
+    UI 預覽和腳本執行共用同一個函數，確保 100% 一致。
+
+    問題背景：
+    - 腳本執行：在 main() 中組裝 prompt（載入 Excel、替換變數）
+    - UI 預覽：在 UI 中重新實作相同邏輯（generate_dynamic_variables()）
+    - 結果：兩份組裝代碼，容易不一致 ❌
+
+    解決方案：
+    - 每個 stage 腳本新增 build_prompts(year, month, prompt_texts=None)
+    - main() 呼叫 build_prompts() 取得最終 prompt
+    - UI 預覽也呼叫 build_prompts()，傳入 prompt_texts（UI 編輯中的文字）
+    - 單一來源原則（Single Source of Truth）✅
+
+  function_signature:
+    name: "build_prompts"
+    parameters:
+      year: "int — 目標年份"
+      month: "int — 目標月份"
+      prompt_texts: |
+        Optional[dict[str, str]] — UI 傳入的編輯中 prompt 文字。
+        key 為變數名（如 'PROMPT', 'PROMPT_INFLOW'），value 為文字內容。
+        如果為 None 或未提供某個 key，使用 module-level 常數。
+    returns: |
+      list[dict] — 每個 dict 包含：
+        - 'name': str — prompt 變數名（如 'PROMPT', 'PROMPT_INFLOW'）
+        - 'text': str — 完整替換後的 prompt 文字（含資料、變數）
+
+  why_prompt_texts_parameter: |
+    Python 的 module-level 變數在 import 後會快取。
+    當 UI 使用者編輯 prompt 並用 update_script_prompts() 寫回腳本後，
+    已 import 的 module 仍持有舊值（除非 reload）。
+
+    prompt_texts 參數解決此問題：
+    - UI 直接把 session_state 中的編輯文字傳入
+    - 不依賴 module reload
+    - 腳本直接執行時不傳此參數，自動使用 module-level 常數
+
+  examples:
+    single_prompt_stage:
+      description: "單一 prompt 的 stage（如 Stage 1, 3, 4）"
+      code: |
+        ```python
+        PROMPT = """
+        請分析 {{YEAR}}年{{MONTH}}月 的市場表現。
+        {{data_comparison}}
+        """
+
+        def build_prompts(year, month, prompt_texts=None):
+            # 載入資料
+            excel_file = project_root / "data" / f"data_{year}{month:02d}.xlsx"
+            data = load_data(excel_file) if excel_file.exists() else ""
+
+            # 使用 UI 傳入的文字 or module-level 常數
+            prompt = (prompt_texts or {}).get('PROMPT', PROMPT)
+
+            # 替換所有變數
+            final = (prompt
+                .replace("{{YEAR}}", str(year))
+                .replace("{{MONTH}}", str(month))
+                .replace("{{data_comparison}}", data)
+            )
+            return [{'name': 'PROMPT', 'text': final}]
+
+        def main(year=2025, month=12):
+            prompts = build_prompts(year, month)
+            result = api.generate(prompts[0]['text'], images)
+        ```
+
+    multi_prompt_stage:
+      description: "多個 prompt 的 stage（如 Stage 5, 6 各有 2 個）"
+      code: |
+        ```python
+        PROMPT_INFLOW = """分析淨流入 ETF... {{target_month}} {{data_table}}"""
+        PROMPT_OUTFLOW = """分析淨流出 ETF... {{target_month}} {{data_table}}"""
+
+        def build_prompts(year, month, prompt_texts=None):
+            target_month = f"{year}年{month}月"
+            excel_file = project_root / "data" / f"etf_data_{year}{month:02d}.xlsx"
+            texts = prompt_texts or {}
+
+            # 各 prompt 獨立載入對應的資料
+            p_in = texts.get('PROMPT_INFLOW', PROMPT_INFLOW)
+            data_in = load_data(excel_file, "淨流入前10名") if excel_file.exists() else ""
+            final_in = p_in.replace("{{target_month}}", target_month)
+            final_in = final_in.replace("{{data_table}}", data_in)
+
+            p_out = texts.get('PROMPT_OUTFLOW', PROMPT_OUTFLOW)
+            data_out = load_data(excel_file, "淨流出前10名") if excel_file.exists() else ""
+            final_out = p_out.replace("{{target_month}}", target_month)
+            final_out = final_out.replace("{{data_table}}", data_out)
+
+            return [
+                {'name': 'PROMPT_INFLOW', 'text': final_in},
+                {'name': 'PROMPT_OUTFLOW', 'text': final_out},
+            ]
+        ```
+
+    dependent_prompt_stage:
+      description: "部分 prompt 依賴前序 API 結果的 stage（如 Stage 7）"
+      code: |
+        ```python
+        PROMPT_US = """總結美國市場...\n{{us_full}}"""
+        PROMPT_TW = """總結台灣市場...\n{{tw_full}}"""
+        PROMPT_OVERALL = """整體總結...\n{{us_conclusion}}\n{{tw_conclusion}}"""
+
+        def build_prompts(year, month, prompt_texts=None):
+            texts = prompt_texts or {}
+            # 讀取前置 stage 輸出
+            stage1 = read_file(f"stage1_output_{year}{month:02d}.md")
+
+            # Prompt 1-2: 可完整替換
+            p_us = texts.get('PROMPT_US', PROMPT_US)
+            final_us = p_us.replace("{{us_full}}", stage1 or "[尚未執行]")
+
+            # Prompt 3: 依賴 API 1-2 結果，預覽時標記
+            p_overall = texts.get('PROMPT_OVERALL', PROMPT_OVERALL)
+            final_overall = (p_overall
+                .replace("{{us_conclusion}}", "[需要前序 API 結果]")
+                .replace("{{tw_conclusion}}", "[需要前序 API 結果]")
+            )
+
+            return [
+                {'name': 'PROMPT_US', 'text': final_us},
+                {'name': 'PROMPT_OVERALL', 'text': final_overall},
+            ]
+
+        def main(year, month):
+            prompts = build_prompts(year, month)
+            # API 1: 使用 prompts[0]['text']
+            us_result = api.generate(prompts[0]['text'])
+            # API 2: 用實際 API 結果替換 PROMPT_OVERALL 的變數
+            final_overall = (PROMPT_OVERALL
+                .replace("{{us_conclusion}}", us_result)
+                .replace("{{tw_conclusion}}", tw_result)
+            )
+            overall_result = api.generate(final_overall)
+        ```
+
+  ui_integration:
+    description: |
+      UI 端透過 importlib 動態 import 各 stage 的 build_prompts()，
+      無需在 UI 中重新實作資料載入和變數替換邏輯。
+    code: |
+      ```python
+      def get_build_prompts_fn(stage_num):
+          """動態取得 stage 腳本的 build_prompts 函數"""
+          import importlib
+          module_map = {
+              1: "scripts.stages.stage1_xxx",
+              2: "scripts.stages.stage2_yyy",
+              # ...
+          }
+          if stage_num not in module_map:
+              return None
+          mod = importlib.import_module(module_map[stage_num])
+          return mod.build_prompts
+
+      # 完整預覽按鈕 handler
+      if st.button("🔄 生成完整預覽"):
+          build_fn = get_build_prompts_fn(stage_num)
+          # 傳入 UI 編輯中的 prompt 文字
+          edited = {pn: st.session_state.get(f"pe_{stage_num}_{pn}", v)
+                    for pn, v in base_prompts.items()}
+          results = build_fn(year, month, prompt_texts=edited)
+          # 顯示對應 prompt 的完整預覽
+          for r in results:
+              if r['name'] == current_prompt_name:
+                  st.text_area("完整預覽", r['text'], disabled=True)
+      ```
+
+  benefits:
+    - "✅ 預覽與執行 100% 一致：使用完全相同的組裝函數"
+    - "✅ 單一維護點：修改組裝邏輯只需改 build_prompts()"
+    - "✅ 解決 module 快取問題：prompt_texts 參數繞過 import 快取"
+    - "✅ 支援所有 prompt 類型：靜態、動態變數、依賴前序 API 結果"
+    - "✅ UI 無需知道資料載入細節：交給 stage 腳本處理"
+
+  migration_guide:
+    description: "將現有 stage 腳本遷移到 build_prompts() 模式"
+    steps:
+      - step: "1. 確保 prompt 是 module-level 常數（不是 f-string）"
+        detail: "如果有 f-string，先用 unsupported.dynamic_fstring.migration_guide 轉換"
+      - step: "2. 新增 build_prompts() 函數"
+        detail: |
+          將 main() 中的資料載入 + 變數替換邏輯提取到 build_prompts()。
+          保持 main() 中的圖片載入和 API 呼叫不動。
+      - step: "3. 修改 main() 呼叫 build_prompts()"
+        detail: |
+          prompts = build_prompts(year, month)
+          result = api.generate(prompts[0]['text'], images)
+      - step: "4. 刪除 UI 中的重複邏輯"
+        detail: |
+          刪除 generate_dynamic_variables() 等 UI 專用的組裝函數，
+          改為呼叫 get_build_prompts_fn(stage_num)(year, month, prompt_texts=edited)
+      - step: "5. 測試"
+        detail: "確認 UI 完整預覽與腳本執行的 prompt 內容一致"
 
 # ============================================================================
 # UI 整合設計（Streamlit）
@@ -505,39 +755,62 @@ ui_integration:
           - 字數/行數顯示
           - 是否已修改的提示
           - text_area 編輯器（可編輯）
-          - 👁️ 預覽 expander（變數替換後，唯讀）
-      - name: "Prompt 預覽功能（新增）"
+      - name: "Prompt 預覽功能（兩種層次）"
         description: |
-          在每個 Prompt 編輯器下方提供預覽功能：
-          - 自動替換靜態變數（如 {{YEAR}}, {{MONTH}}）
-          - 動態變數標記為 [執行時動態生成: {{xxx}}]
-          - 唯讀 text_area（disabled=True）
+          ⭐ 提供兩層次的預覽：
+
+          【輕量靜態預覽】render_prompt_with_variables()
+          - 僅替換靜態變數（{{YEAR}}, {{MONTH}} 等）
+          - 動態變數（需讀取 Excel/檔案）標記為 [執行時動態生成: {{xxx}}]
+          - 即時回饋，不需要讀取任何檔案
           - 顯示替換後的字數和行數
-        implementation: |
+
+          【完整預覽】呼叫 build_prompts()（⭐ 推薦）
+          - 呼叫 stage 腳本的 build_prompts(year, month, prompt_texts=edited)
+          - 完整替換所有變數（含 Excel 資料）
+          - 預覽內容與實際執行完全一致
+          - 需要資料檔案存在
+
+        static_preview_implementation: |
           def render_prompt_with_variables(prompt_text, year, month):
-              """替換 prompt 中的變數為實際值"""
-              prev = get_prev_prefix(year, month)
-              prev_year = int(prev[:4])
-              prev_month = int(prev[4:])
-
-              rendered = prompt_text
-              rendered = rendered.replace("{{YEAR}}", str(year))
-              rendered = rendered.replace("{{MONTH}}", str(month))
-              rendered = rendered.replace("{{PREV_YEAR}}", str(prev_year))
-              rendered = rendered.replace("{{PREV_MONTH}}", str(prev_month))
-
-              # 動態變數標記
-              dynamic_vars = ["{{data_comparison}}", "{{stage1_output}}", ...]
-              for var in dynamic_vars:
-                  if var in rendered:
-                      rendered = rendered.replace(var, f"[執行時動態生成: {var}]")
-
+              """輕量靜態預覽：僅替換已知的靜態變數"""
+              prev_year, prev_month = calculate_prev_month(year, month)
+              rendered = (prompt_text
+                  .replace("{{YEAR}}", str(year))
+                  .replace("{{MONTH}}", str(month))
+                  .replace("{{PREV_YEAR}}", str(prev_year))
+                  .replace("{{PREV_MONTH}}", str(prev_month))
+              )
+              # 剩餘動態變數標記
+              import re
+              rendered = re.sub(r'\{\{(\w+)\}\}',
+                                lambda m: f"[執行時動態生成: {{{{{m.group(1)}}}}}]",
+                                rendered)
               return rendered
-        benefits:
-          - "即時看到變數替換後的實際 prompt"
-          - "方便檢查變數是否正確"
-          - "清楚知道哪些是動態變數"
-          - "唯讀保護，避免誤編輯預覽內容"
+
+        complete_preview_implementation: |
+          def get_build_prompts_fn(stage_num):
+              """動態取得 stage 腳本的 build_prompts()"""
+              import importlib
+              module_map = {1: "scripts.stages.stage1_xxx", ...}
+              mod = importlib.import_module(module_map[stage_num])
+              return mod.build_prompts
+
+          # 完整預覽按鈕
+          if st.button("🔄 生成完整預覽（含資料）"):
+              build_fn = get_build_prompts_fn(stage_num)
+              edited = {pn: st.session_state.get(f"pe_{stage_num}_{pn}", v)
+                        for pn, v in base_prompts.items()}
+              results = build_fn(year, month, prompt_texts=edited)
+              for r in results:
+                  st.text_area(f"完整預覽：{r['name']}", r['text'],
+                               height=300, disabled=True)
+
+        note: |
+          ⚠️ 不要在 UI 中重新實作 build_prompts() 的資料載入邏輯。
+          直接 import 並呼叫 stage 腳本的 build_prompts()，
+          確保預覽與執行使用完全相同的程式碼路徑。
+
       - name: "操作按鈕列（3 欄）"
         buttons:
           - "💾 暫存草稿 — 存到 prompts/drafts/ JSON，不影響執行"
@@ -681,16 +954,32 @@ known_pitfalls:
       含有 {variable} 的 f-string prompt 不是 module-level 常數，
       regex 無法靜態提取，且也無法寫回。
     solution: |
-      在 STAGE_META 設 prompt_key=None，
-      UI 顯示說明訊息引導使用者查看/編輯原始碼。
+      ⭐ 推薦做法：將 f-string 轉換為模板常數 + {{variable}} 佔位符
+      （詳見 script_prompt_conventions.unsupported.dynamic_fstring.migration_guide）
 
-  - issue: "JSON 快取可能過期"
+      舊方案（不推薦）：在 STAGE_META 設 prompt_key=None，顯示說明訊息。
+      此方案無法在 UI 中編輯該 stage 的 prompt，體驗差。
+
+  - issue: "JSON 快取與腳本不同步（舊版設計問題）"
     description: |
-      如果使用者直接修改 .py 腳本（不透過 UI），
-      JSON 快取會與腳本不同步。
+      舊版 get_prompts() 優先讀取 JSON 快取。
+      當使用者透過 UI 「更新到腳本」後，.py 腳本已更新，
+      但 JSON 快取仍是舊版，導致 UI 重新整理後顯示舊 prompt。
     solution: |
-      提供「從腳本重新載入」按鈕，清除 session_state 和 JSON 快取。
-      也可以比較 .py 和 .json 的 mtime 自動偵測。
+      ⭐ 根本解法：get_prompts() 永遠從 .py 腳本提取（不使用 JSON 快取）。
+      JSON 檔案僅用於草稿暫存（drafts/），不作為讀取來源。
+      update_script_prompts() 無需同步 JSON 快取。
+
+  - issue: "預覽與執行的 prompt 組裝邏輯不一致"
+    description: |
+      UI 中有獨立的 generate_dynamic_variables() 函數來組裝預覽 prompt，
+      stage 腳本 main() 有自己的組裝邏輯。
+      兩份代碼可能漸漸出現不一致，導致預覽與執行結果不同。
+    solution: |
+      ⭐ 根本解法：每個 stage 腳本實作 build_prompts(year, month, prompt_texts=None)，
+      UI 預覽和 main() 都呼叫此函數。
+      刪除 UI 中的 generate_dynamic_variables() 等重複邏輯。
+      （詳見 build_prompts_pattern 章節）
 
   - issue: "Windows 編碼問題"
     description: "subprocess 執行腳本時輸出含有非 ASCII 字元"
@@ -717,40 +1006,59 @@ ai_implementation_guide:
       - 有哪些 stage/step？
       - 每個 stage 呼叫哪些 API？
       - prompt 目前寫在哪裡？格式為何？
-      - 哪些 prompt 是靜態的？哪些是動態的？
+      - 哪些 prompt 是靜態的？哪些含有動態資料（需讀取 Excel 等）？
+      - 哪些 prompt 依賴前序 stage 的 API 結果？
 
   step_2_standardize_prompts:
     description: |
-      將各腳本的 prompt 統一為 module-level 常數：
+      將各腳本的 prompt 統一為 module-level 常數 + {{variable}} 佔位符：
       - 單一 prompt 的 stage → PROMPT = """..."""
       - 多 prompt 的 stage → PROMPT_SECTION_A = """..."""
-      - 動態 prompt → 保持原樣，但在 UI 標記為不可編輯
+      - 動態 f-string → 轉換為模板常數（見 migration_guide）
+        例：f"...{data}..." → PROMPT = """...{{data}}..."""
+      - 依賴前序 API 的變數 → 使用 {{variable}} 佔位符，
+        build_prompts() 中標記為 [需要前序 API 結果]，main() 中替換
 
   step_3_create_prompt_manager:
     description: |
       建立 PromptManager 類別：
-      - 定義 prompt_files 映射表
-      - 實作 extract / get / save / update 方法
+      - 定義 prompt_files 映射表（所有 stage 都要有 mapping，包括以前設 None 的）
+      - 實作 extract / get / update 方法
+      - ⭐ get_prompts() 永遠從腳本提取，不優先讀取 JSON 快取
       - 實作 backup / restore 方法
       - 確保 extract 和 update 的 regex 一致
 
-  step_4_integrate_ui:
+  step_4_add_build_prompts:
+    description: |
+      ⭐ 為每個 stage 腳本新增 build_prompts() 函數：
+      - 將 main() 中的資料載入 + 變數替換邏輯提取到 build_prompts()
+      - 函數簽名：build_prompts(year, month, prompt_texts=None)
+      - 回傳：list[{'name': str, 'text': str}]
+      - 修改 main() 呼叫 build_prompts()
+      - UI 和 main() 共用同一個函數
+      （詳見 build_prompts_pattern 章節）
+
+  step_5_integrate_ui:
     description: |
       在 Streamlit UI 中整合：
-      - 定義 STAGE_META 配置
-      - 建立 ui_prompts() 元件（含預覽功能）
-      - 建立 render_prompt_with_variables() 函數（變數替換）
+      - 定義 STAGE_META 配置（所有 stage 都設 prompt_key，不再設 None）
+      - 建立 ui_prompts() 元件（含兩層次預覽功能）
+      - 輕量預覽：render_prompt_with_variables()（靜態變數替換）
+      - 完整預覽：get_build_prompts_fn() + build_prompts()（完整組裝）
+      - ⭐ 刪除 generate_dynamic_variables() 等重複邏輯
       - 建立草稿管理功能
       - 建立版本管理功能
       - 每個 stage 頁面整合輸入管理 + 執行 + 版本記錄
       - 創建三種安全啟動腳本（安全/內網/開放模式）
       - 配置 .streamlit/config.toml 安全選項
 
-  step_5_test:
+  step_6_test:
     description: |
       測試要點：
       - 從腳本提取 prompt → 編輯 → 儲存草稿 → 載入草稿
       - 更新到腳本 → 確認 .py 檔案真的被修改
+      - 重整 UI → 確認顯示的是新版 prompt（不是 JSON 快取的舊版）
+      - 完整預覽 → 確認內容與實際執行的 prompt 一致
       - 執行 stage → 確認用的是新 prompt
       - 版本快照 → 切換版本 → 確認組裝使用正確版本
 
