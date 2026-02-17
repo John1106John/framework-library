@@ -20,11 +20,11 @@
 
 metadata:
   name: "Prompt Management System"
-  version: "1.2.0"
-  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、預覽執行一致性"
+  version: "1.3.0"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性"
   author: "John1106John"
   created_at: "2026-02-09"
-  updated_at: "2026-02-13"
+  updated_at: "2026-02-17"
   license: "MIT"
   compatibility:
     - "多階段 AI Workflow"
@@ -88,6 +88,15 @@ architecture:
         - 將修改寫回 .py 腳本
         - 自動備份（修改前）
         - 列出/還原備份
+        - Baseline 管理（儲存、比較、還原基準版本）
+
+    - name: Baseline Manager (PromptManager 內建)
+      role: Prompt 基準版本管理
+      responsibilities:
+        - 將目前腳本 prompt 儲存為 baseline（參考基準）
+        - 比較目前腳本與 baseline 的差異
+        - 從 baseline 還原腳本（自動備份後覆蓋）
+        - Baseline 不可刪除，僅能覆蓋更新
 
     - name: UI Prompt Editor (Streamlit)
       role: 前端互動介面
@@ -95,9 +104,11 @@ architecture:
         - 顯示各 stage 的 prompt（text_area 編輯器）
         - 顯示字數、行數、是否已修改
         - 暫存草稿（JSON）
-        - 載入草稿
+        - 載入草稿 / 刪除草稿
         - 更新到腳本
         - 從腳本重新載入
+        - Baseline 比較（與基準版本比對差異）
+        - 草稿記錄中置頂顯示 Baseline（可載入，不可刪除）
 
     - name: Version Manager
       role: 輸出版本控制
@@ -117,12 +128,14 @@ directory_structure:
     {project_root} 是你的專案根目錄。
   layout:
     prompts/: "JSON 快取，每個 stage 一個檔案"
+    prompts/baselines/: "Baseline 基準版本（不可刪除，僅能覆蓋更新）"
     prompts/backups/: "自動備份（.json 和 .py），修改前自動建立"
-    prompts/drafts/: "UI 暫存草稿，不影響實際執行"
+    prompts/drafts/: "UI 暫存草稿，不影響實際執行，可刪除"
     temp/versions/{YYYYMM}/stage{N}/: "輸出版本快照"
     temp/active_versions_{YYYYMM}.json: "記錄各 stage 的主要版本 ID"
   file_naming:
     json_cache: "stage{N}_prompts.json"
+    baseline: "stage{N}_baseline.json"
     draft: "stage{N}_{YYYYMMDD_HHMMSS}.json"
     backup_json: "stage{N}_prompts_{YYYYMMDD_HHMMSS}.json"
     backup_script: "{script_stem}_{YYYYMMDD_HHMMSS}.py"
@@ -345,8 +358,16 @@ prompt_manager_class:
     parameters: []
     initialization:
       - "推導 project_root（通常 Path(__file__).parent.parent）"
-      - "建立 prompts_dir 和 backup_dir"
+      - "建立 prompts_dir、backup_dir 和 baseline_dir"
       - "定義 prompt_files 映射表：stage 名稱 → {json 路徑, 腳本路徑}"
+    example: |
+      self.project_root = Path(__file__).parent.parent
+      self.prompts_dir = self.project_root / "prompts"
+      self.backup_dir = self.prompts_dir / "backups"
+      self.baseline_dir = self.prompts_dir / "baselines"
+      self.prompts_dir.mkdir(exist_ok=True)
+      self.backup_dir.mkdir(exist_ok=True)
+      self.baseline_dir.mkdir(exist_ok=True)
 
   prompt_files_mapping:
     description: |
@@ -435,6 +456,116 @@ prompt_manager_class:
 
     restore_from_backup:
       purpose: "從備份還原 JSON 快取"
+
+    # ===== Baseline 管理方法 =====
+
+    _stage_num:
+      purpose: "從 report_type 名稱提取 Stage 編號（內部輔助方法）"
+      input: "report_type (str)"
+      output: "int | None"
+      example: |
+        def _stage_num(self, report_type):
+            for key in self.prompt_files:
+                if key == report_type:
+                    try:
+                        return int(key.split("：")[0].replace("Stage ", ""))
+                    except (ValueError, IndexError):
+                        return None
+            return None
+
+    get_baseline:
+      purpose: "讀取指定 Stage 的 baseline prompt"
+      input: "report_type (str)"
+      output: "dict[str, str] — baseline prompt 內容，找不到回傳空 dict"
+      logic: |
+        1. 用 _stage_num() 取得 stage 編號
+        2. 讀取 baselines/stage{N}_baseline.json
+        3. 回傳 JSON 內容
+      example: |
+        def get_baseline(self, report_type):
+            num = self._stage_num(report_type)
+            if num is None:
+                return {}
+            baseline_file = self.baseline_dir / f"stage{num}_baseline.json"
+            if not baseline_file.exists():
+                return {}
+            try:
+                with open(baseline_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+
+    save_baseline:
+      purpose: "將目前腳本中的 prompt 儲存為 baseline（覆蓋現有 baseline）"
+      input: "report_type (str)"
+      output: "bool — 是否成功"
+      logic: |
+        1. 用 get_prompts() 取得目前腳本的 prompt
+        2. 寫入 baselines/stage{N}_baseline.json
+        ⚠️ Baseline 不可刪除，僅能覆蓋更新
+      example: |
+        def save_baseline(self, report_type):
+            num = self._stage_num(report_type)
+            if num is None:
+                return False
+            prompts = self.get_prompts(report_type)
+            if not prompts:
+                return False
+            baseline_file = self.baseline_dir / f"stage{num}_baseline.json"
+            try:
+                with open(baseline_file, 'w', encoding='utf-8') as f:
+                    json.dump(prompts, f, ensure_ascii=False, indent=2)
+                return True
+            except Exception:
+                return False
+
+    compare_with_baseline:
+      purpose: "比較目前腳本 prompt 與 baseline，回傳差異資訊"
+      input: "report_type (str)"
+      output: |
+        dict: {
+            'has_baseline': bool,      # 是否有 baseline
+            'is_identical': bool,       # 目前腳本與 baseline 是否完全一致
+            'diffs': {                  # 逐 key 比較結果
+                prompt_key: {
+                    'baseline': str|None,
+                    'current': str|None,
+                    'changed': bool
+                }
+            }
+        }
+      example: |
+        def compare_with_baseline(self, report_type):
+            baseline = self.get_baseline(report_type)
+            current = self.get_prompts(report_type)
+            if not baseline:
+                return {'has_baseline': False, 'is_identical': False, 'diffs': {}}
+            all_keys = sorted(set(list(baseline.keys()) + list(current.keys())))
+            diffs = {}
+            all_same = True
+            for key in all_keys:
+                b_val = baseline.get(key)
+                c_val = current.get(key)
+                changed = b_val != c_val
+                if changed:
+                    all_same = False
+                diffs[key] = {'baseline': b_val, 'current': c_val, 'changed': changed}
+            return {'has_baseline': True, 'is_identical': all_same, 'diffs': diffs}
+
+    restore_from_baseline:
+      purpose: "從 baseline 恢復 prompt 到腳本（先備份再覆蓋）"
+      input: "report_type (str)"
+      output: "bool — 是否成功"
+      logic: |
+        1. 讀取 baseline
+        2. 呼叫 update_script_prompts() 寫回腳本
+        ⭐ update_script_prompts 內部會自動備份，所以這裡不需要額外備份
+      example: |
+        def restore_from_baseline(self, report_type):
+            baseline = self.get_baseline(report_type)
+            if not baseline:
+                return False
+            return self.update_script_prompts(report_type, baseline)
 
 # ============================================================================
 # 腳本端 Prompt 寫法規範
@@ -747,8 +878,23 @@ ui_integration:
       3. 📜 版本記錄 — 輸出版本快照管理
 
     prompt_section_components:
-      - name: "草稿記錄 expander"
-        description: "列出已存的草稿，可點載入"
+      - name: "草稿記錄 expander（含 Baseline）"
+        description: |
+          列出已存的草稿，Baseline 固定在最上方。
+          - Baseline：置頂顯示，有「載入」按鈕，無刪除按鈕（不可刪除）
+          - 草稿：依時間排序，有「載入」和「🗑」刪除按鈕
+          - Baseline 與草稿之間用分隔線區分
+
+      - name: "Baseline 比較 expander"
+        description: |
+          顯示目前腳本 prompt 與 Baseline 的差異：
+          - 有 Baseline 時：顯示「✅ 與 Baseline 一致」或「⚠️ 與 Baseline 不同」
+          - 有差異時：左右並排顯示 Baseline vs 目前腳本（disabled text_area）
+          - 操作按鈕：
+            - 📌 將目前腳本設為新 Baseline（覆蓋現有）
+            - ⏪ 從 Baseline 還原腳本（只在有差異時顯示）
+          - 無 Baseline 時：顯示「📌 Baseline（尚未建立）」+ 建立按鈕
+
       - name: "各 Prompt 編輯器"
         description: |
           每個 prompt 變數一個 expander，內含：
@@ -833,45 +979,135 @@ ui_integration:
               st.warning("找不到 Prompt")
               return
 
-          # 草稿管理
+          # ===== 草稿管理（含 Baseline 置頂）=====
+          baseline_prompts = pm.get_baseline(meta["prompt_key"])
           drafts = get_drafts(stage_num)
-          if drafts:
-              with st.expander(f"草稿記錄（{len(drafts)} 個）"):
-                  for d in drafts[:10]:
-                      if st.button("載入", key=f"ld_{stage_num}_{d['id']}"):
-                          loaded = json.loads(Path(d["path"]).read_text(encoding='utf-8'))
-                          for pn, content in loaded.items():
-                              st.session_state[f"pe_{stage_num}_{pn}"] = content
-                          st.rerun()
+          has_entries = bool(baseline_prompts or drafts)
 
-          # 編輯各 Prompt
+          if has_entries:
+              draft_label = f"📁 草稿記錄（{len(drafts)} 個）" if drafts else "📁 草稿記錄"
+              with st.expander(draft_label, expanded=False):
+                  # Baseline 固定在最上方
+                  if baseline_prompts:
+                      c1, c2, c3 = st.columns([5, 1, 1])
+                      with c1:
+                          st.text("📌 Baseline（基準版本）")
+                      with c2:
+                          if st.button("載入", key=f"ld_{stage_num}_baseline",
+                                       use_container_width=True):
+                              for pn, content in baseline_prompts.items():
+                                  st.session_state[f"pe_{stage_num}_{pn}"] = content
+                              st.rerun()
+                      with c3:
+                          st.empty()  # Baseline 不可刪除
+                      if drafts:
+                          st.divider()
+
+                  # 草稿列表（載入 + 刪除按鈕）
+                  for d in drafts[:10]:
+                      c1, c2, c3 = st.columns([5, 1, 1])
+                      with c1:
+                          st.text(f"{d['id']}  ({d['time'].strftime('%m-%d %H:%M:%S')})")
+                      with c2:
+                          if st.button("載入", key=f"ld_{stage_num}_{d['id']}",
+                                       use_container_width=True):
+                              loaded = json.loads(
+                                  Path(d["path"]).read_text(encoding='utf-8'))
+                              for pn, content in loaded.items():
+                                  st.session_state[f"pe_{stage_num}_{pn}"] = content
+                              st.rerun()
+                      with c3:
+                          if st.button("🗑", key=f"del_{stage_num}_{d['id']}",
+                                       use_container_width=True):
+                              Path(d["path"]).unlink()
+                              st.rerun()
+
+          # ===== 各 Prompt 編輯器 =====
           for pname, default in base_prompts.items():
               init = st.session_state.get(f"pe_{stage_num}_{pname}", default)
               with st.expander(f"✏️ {pname}"):
-                  # 顯示字數、行數、修改狀態
                   cc = st.columns(3)
                   cc[0].caption(f"字數：{len(init)}")
                   cc[1].caption(f"行數：{len(init.splitlines())}")
                   if init != default:
                       cc[2].caption("⚠️ 已修改")
 
-                  # 編輯器
                   st.text_area("", init, height=250,
                                key=f"pe_{stage_num}_{pname}",
                                label_visibility="collapsed")
 
-                  # 預覽（變數替換後）
                   if year and month:
                       with st.expander(f"👁️ 預覽（變數替換後）", expanded=False):
                           rendered = render_prompt_with_variables(init, year, month)
                           st.text_area("", rendered, height=250,
                                        key=f"preview_{stage_num}_{pname}",
                                        label_visibility="collapsed",
-                                       disabled=True,
-                                       help="此為變數替換後的預覽，唯讀模式")
+                                       disabled=True)
                           st.caption(f"📊 替換後字數：{len(rendered)} | 行數：{len(rendered.splitlines())}")
 
-          # 三個按鈕
+          # ===== Baseline 比較 =====
+          comparison = pm.compare_with_baseline(meta["prompt_key"])
+          if comparison['has_baseline']:
+              status_label = "與 Baseline 一致" if comparison['is_identical'] else "與 Baseline 不同"
+              status_icon = "✅" if comparison['is_identical'] else "⚠️"
+              with st.expander(f"{status_icon} Baseline 比較（{status_label}）", expanded=False):
+                  if comparison['is_identical']:
+                      st.success("目前腳本的 Prompt 與 Baseline 完全一致。")
+                  else:
+                      for pname, diff in comparison['diffs'].items():
+                          if diff['changed']:
+                              st.markdown(f"**`{pname}`** — 有差異")
+                              bl_col, cur_col = st.columns(2)
+                              with bl_col:
+                                  st.caption("Baseline")
+                                  if diff['baseline']:
+                                      st.text_area("", diff['baseline'], height=200,
+                                                   key=f"bl_{stage_num}_{pname}",
+                                                   disabled=True,
+                                                   label_visibility="collapsed")
+                                  else:
+                                      st.info("（Baseline 中不存在此 key）")
+                              with cur_col:
+                                  st.caption("目前腳本")
+                                  if diff['current']:
+                                      st.text_area("", diff['current'], height=200,
+                                                   key=f"cur_{stage_num}_{pname}",
+                                                   disabled=True,
+                                                   label_visibility="collapsed")
+                                  else:
+                                      st.info("（腳本中不存在此 key）")
+                              st.divider()
+                          else:
+                              st.caption(f"`{pname}` — 無差異")
+
+                  bl_c1, bl_c2 = st.columns(2)
+                  with bl_c1:
+                      if st.button("📌 將目前腳本設為新 Baseline",
+                                   key=f"set_bl_{stage_num}",
+                                   use_container_width=True):
+                          if pm.save_baseline(meta["prompt_key"]):
+                              st.success("✅ Baseline 已更新")
+                              st.rerun()
+                  with bl_c2:
+                      if not comparison['is_identical']:
+                          if st.button("⏪ 從 Baseline 還原腳本",
+                                       key=f"restore_bl_{stage_num}",
+                                       use_container_width=True):
+                              if pm.restore_from_baseline(meta["prompt_key"]):
+                                  st.success("✅ 已還原為 Baseline")
+                                  for pn in base_prompts:
+                                      st.session_state.pop(f"pe_{stage_num}_{pn}", None)
+                                  st.rerun()
+          else:
+              with st.expander("📌 Baseline（尚未建立）", expanded=False):
+                  if st.button("📌 將目前腳本設為 Baseline",
+                               key=f"init_bl_{stage_num}",
+                               use_container_width=True):
+                      if pm.save_baseline(meta["prompt_key"]):
+                          st.success("✅ Baseline 已建立")
+                          st.rerun()
+
+          # ===== 三個按鈕 =====
           c1, c2, c3 = st.columns(3)
           # 暫存草稿 → save_draft()
           # 更新到腳本 → pm.update_script_prompts()
@@ -987,6 +1223,18 @@ known_pitfalls:
       subprocess.Popen 加上 encoding='utf-8', errors='replace'。
       腳本頭部加 sys.stdout.reconfigure(encoding='utf-8', errors='replace')。
 
+  - issue: "Baseline 與腳本不同步（Stage 重新排序後）"
+    description: |
+      當 Stage 重新排序（如 Stage 2 和 Stage 4 互換）時，
+      baseline JSON 檔名仍然用舊的 stage 編號，
+      導致 baseline 與腳本不對應。
+    solution: |
+      重新排序 Stage 後，需要重新生成所有 baseline：
+      1. 確認所有 stage 腳本的 prompt 內容正確
+      2. 對每個 stage 執行 save_baseline()
+      3. 驗證 baselines/ 目錄中的檔案與腳本一致
+      ⚠️ Baseline 不可刪除，只能覆蓋更新
+
   - issue: "Streamlit session_state 與 widget key 衝突"
     description: |
       text_area 的 key 和 session_state 預設值需要精心設計，
@@ -1027,6 +1275,8 @@ ai_implementation_guide:
       - ⭐ get_prompts() 永遠從腳本提取，不優先讀取 JSON 快取
       - 實作 backup / restore 方法
       - 確保 extract 和 update 的 regex 一致
+      - 實作 Baseline 管理方法（get_baseline, save_baseline, compare_with_baseline, restore_from_baseline）
+      - 建立 baselines/ 目錄，Baseline 不可刪除僅能覆蓋
 
   step_4_add_build_prompts:
     description: |
@@ -1046,7 +1296,9 @@ ai_implementation_guide:
       - 輕量預覽：render_prompt_with_variables()（靜態變數替換）
       - 完整預覽：get_build_prompts_fn() + build_prompts()（完整組裝）
       - ⭐ 刪除 generate_dynamic_variables() 等重複邏輯
-      - 建立草稿管理功能
+      - 建立草稿管理功能（含刪除按鈕）
+      - 建立 Baseline 比較功能（差異顯示、設為 Baseline、從 Baseline 還原）
+      - 草稿記錄中置頂顯示 Baseline（可載入，不可刪除）
       - 建立版本管理功能
       - 每個 stage 頁面整合輸入管理 + 執行 + 版本記錄
       - 創建三種安全啟動腳本（安全/內網/開放模式）
@@ -1055,12 +1307,17 @@ ai_implementation_guide:
   step_6_test:
     description: |
       測試要點：
-      - 從腳本提取 prompt → 編輯 → 儲存草稿 → 載入草稿
+      - 從腳本提取 prompt → 編輯 → 儲存草稿 → 載入草稿 → 刪除草稿
       - 更新到腳本 → 確認 .py 檔案真的被修改
       - 重整 UI → 確認顯示的是新版 prompt（不是 JSON 快取的舊版）
       - 完整預覽 → 確認內容與實際執行的 prompt 一致
       - 執行 stage → 確認用的是新 prompt
       - 版本快照 → 切換版本 → 確認組裝使用正確版本
+      - Baseline 測試：
+        - 設為 Baseline → 確認 baselines/ 目錄有對應 JSON
+        - 修改 prompt → Baseline 比較顯示「⚠️ 與 Baseline 不同」
+        - 從 Baseline 還原 → 確認腳本回復到 baseline 版本
+        - 草稿記錄中 Baseline 置頂 → 只有載入按鈕、無刪除按鈕
 
 # ============================================================================
 # 快速開始範例
@@ -1107,8 +1364,9 @@ quick_start_example:
     ├── prompts/
     │   ├── stage1_prompts.json      # 快取
     │   ├── stage2_prompts.json
+    │   ├── baselines/               # Baseline 基準版本（不可刪除）
     │   ├── backups/                 # 自動備份
-    │   └── drafts/                  # 草稿
+    │   └── drafts/                  # 草稿（可刪除）
     ├── temp/
     │   ├── versions/                # 版本快照
     │   └── active_versions_*.json   # 主要版本追蹤

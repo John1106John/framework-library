@@ -20,8 +20,9 @@
 ### 步驟 1：建立目錄結構
 在專案根目錄建立以下目錄：
 - prompts/（JSON 快取）
+- prompts/baselines/（Baseline 基準版本，不可刪除）
 - prompts/backups/（自動備份）
-- prompts/drafts/（UI 草稿暫存）
+- prompts/drafts/（UI 草稿暫存，可刪除）
 - temp/versions/{YYYYMM}/（輸出版本快照）
 - utils/（工具模組，如不存在）
 
@@ -29,17 +30,22 @@
 建立 utils/prompt_manager.py，實作以下功能：
 1. PromptManager 類別：
    - extract_prompts_from_script(script_path) - 從 .py 提取 PROMPT 常數
-   - save_prompts_to_json(prompts, stage_num) - 儲存到 JSON 快取
-   - load_prompts_from_json(stage_num) - 從 JSON 載入
-   - update_script_prompts(script_path, prompts) - 寫回 .py 腳本
-   - backup_before_update(script_path, json_path) - 自動備份
+   - get_prompts(report_type) - 取得 prompt（永遠從腳本提取）
+   - save_prompts(report_type, prompts) - 儲存到 JSON 快取
+   - update_script_prompts(report_type, prompts) - 寫回 .py 腳本
    - list_backups(stage_num) - 列出所有備份
-   - restore_backup(backup_path) - 還原備份
+   - restore_from_backup(backup_path) - 還原備份
+   - get_baseline(report_type) - 讀取 baseline 基準版本
+   - save_baseline(report_type) - 將目前腳本設為 baseline
+   - compare_with_baseline(report_type) - 比較目前腳本與 baseline 差異
+   - restore_from_baseline(report_type) - 從 baseline 還原腳本
 
 2. 設計原則：
    - Prompt 以 Python 常數形式寫在腳本中（PROMPT_1 = """..."""）
-   - JSON 快取僅用於加速載入和草稿功能
+   - get_prompts() 永遠從 .py 腳本提取（不依賴 JSON 快取）
+   - JSON 快取僅用於草稿暫存，不作為讀取來源
    - 修改前自動備份 .py 和 .json 檔案
+   - Baseline 為穩定參考版本，不可刪除僅能覆蓋
 
 ### 步驟 3：掃描 Stage 腳本
 掃描我的 Stage 腳本（scripts/stages/stage*.py），找出所有 Prompt：
@@ -76,6 +82,8 @@ def load_excel_data(file_path, year, month):
    - 顯示字數、行數統計
    - 顯示修改狀態（Modified / Saved）
    - 按鈕：儲存草稿、載入草稿、更新腳本、重新載入
+   - 草稿記錄：Baseline 置頂（可載入，不可刪除），草稿可載入和刪除（🗑 按鈕）
+   - Baseline 比較：顯示目前腳本與 Baseline 的差異（左右並排），可設為新 Baseline 或從 Baseline 還原
    - 預覽功能：使用 utils/data_formatter.py 生成實際變數替換後的 Prompt
 
 如果專案沒有 Streamlit UI：
@@ -297,6 +305,6 @@ Stage 腳本目錄：[如 scripts/stages/]
 
 ---
 
-**版本：** 1.0.0
-**最後更新：** 2026-02-10
+**版本：** 1.3.0
+**最後更新：** 2026-02-17
 **適用專案：** 多階段 AI Workflow（報告生成、內容分析、數據處理等）
