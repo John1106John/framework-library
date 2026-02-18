@@ -101,10 +101,52 @@ def load_excel_data(file_path, year, month):
 
 2. 在每個 Stage 腳本執行成功後，自動呼叫 snapshot_output()
 
-### 步驟 7：更新 Stage 腳本
+### 步驟 7：建立 Stage 間統一讀取模組（重要！）
+當 Stage 間存在依賴關係（如 Stage B 讀取 Stage A 的輸出）時，
+建立 utils/stage_io.py，確保所有觸發路徑讀到相同資料：
+
+```python
+# utils/stage_io.py
+from pathlib import Path
+import json
+
+project_root = Path(__file__).parent.parent
+
+STAGE_OUTPUT_PREFIX = {
+    1: "stage1_xxx",  # 依專案定義
+    2: "stage2_yyy",
+    # ...
+}
+
+def read_stage_output(stage_num, year, month):
+    """統一讀取 Stage 輸出：比較活動版本與 temp/ 的時間戳，取較新者"""
+    prefix = f"{year}{month:02d}"
+    version_path = _get_active_version_path(stage_num, prefix)
+    temp_path = _get_temp_path(stage_num, prefix)
+
+    if version_path and temp_path:
+        if temp_path.stat().st_mtime >= version_path.stat().st_mtime:
+            return temp_path.read_text(encoding='utf-8')
+        else:
+            return version_path.read_text(encoding='utf-8')
+    if version_path:
+        return version_path.read_text(encoding='utf-8')
+    if temp_path:
+        return temp_path.read_text(encoding='utf-8')
+    return ""
+```
+
+設計原則：
+- 所有 build_prompts() 內部使用 read_stage_output() 讀取前置 Stage 輸出
+- 不從 UI 外部傳入依賴資料，避免多條讀取路徑
+- 時間戳比較確保一鍵 workflow 讀到最新結果、UI 選定版本後也能正確讀取
+
+參考：prompt_management_system_spec.yaml 的 stage_output_reading 章節
+
+### 步驟 8：更新 Stage 腳本
 重構 Stage 腳本：
 1. 將資料格式化邏輯移到 utils/data_formatter.py
-2. 在腳本開頭 import 共用函數
+2. 在腳本開頭 import 共用函數（包含 utils/stage_io.py）
 3. 在腳本結尾加入版本快照（如果使用版本管理）
 
 範例：
@@ -130,7 +172,7 @@ def main(year, month):
     VersionManager().snapshot_output(stage_num=1, output_md=result, version_id=f"v{timestamp}")
 ```
 
-### 步驟 8：新增輸入驗證（Input Validation）
+### 步驟 9：新增輸入驗證（Input Validation）
 為每個 Stage 腳本新增 check_inputs() 函數，並在 Workflow 中統一呼叫：
 1. 每個 Stage 腳本新增 check_inputs(year, month)：
    - 檢查圖片、Excel、前置 Stage 輸出是否存在
@@ -155,7 +197,7 @@ def check_inputs(year, month):
 
 參考：prompt_management_system_spec.yaml 的 input_validation 章節
 
-### 步驟 9：建立測試腳本
+### 步驟 10：建立測試腳本
 建立 test_prompt_manager.py：
 1. 測試 Prompt 提取（從 .py 腳本）
 2. 測試 JSON 快取讀寫
@@ -165,7 +207,7 @@ def check_inputs(year, month):
 6. 測試 check_inputs() 輸入驗證（缺少圖片/Excel/前置輸出）
 7. 輸出測試結果
 
-### 步驟 10：整合報告
+### 步驟 11：整合報告
 完成後，請提供：
 1. 建立了哪些新檔案（列出路徑）
 2. 修改了哪些現有檔案
@@ -200,9 +242,10 @@ Stage 腳本目錄：[如 scripts/stages/]
 1. 建立目錄結構（prompts/, prompts/backups/, utils/）
 2. 建立 utils/prompt_manager.py（Prompt 提取、JSON 快取、寫回腳本）
 3. 建立 utils/data_formatter.py（共用資料格式化模組）
-4. 掃描 Stage 腳本，提取所有 PROMPT 常數
-5. 整合到現有 Streamlit UI 或建立新 UI
-6. 建立測試腳本驗證功能
+4. 建立 utils/stage_io.py（Stage 間依賴統一讀取，時間戳比較）
+5. 掃描 Stage 腳本，提取所有 PROMPT 常數
+6. 整合到現有 Streamlit UI 或建立新 UI
+7. 建立測試腳本驗證功能
 
 參考：prompt_management_system_spec.yaml
 ```
@@ -320,6 +363,12 @@ Stage 腳本目錄：[如 scripts/stages/]
 - 可切換主要版本（active version）
 - 支援版本比較和刪除
 
+### 5. Stage 間統一讀取（Unified Stage Output Reading）
+- Stage 間有依賴時，所有觸發路徑必須用同一個函數讀取
+- utils/stage_io.py 提供 read_stage_output() 單一讀取入口
+- 時間戳比較：活動版本 vs temp/，自動取較新者
+- 確保 UI 預覽、UI 執行、CLI、一鍵 workflow 讀到相同資料
+
 ---
 
 ## 📖 延伸閱讀
@@ -328,9 +377,10 @@ Stage 腳本目錄：[如 scripts/stages/]
 - **使用文檔**：README_PROMPT_SPEC.md
 - **目錄結構**：見 spec.yaml 的 directory_structure 章節
 - **共用格式化架構**：見 spec.yaml 的 shared_formatters 章節
+- **統一讀取機制**：見 spec.yaml 的 stage_output_reading 章節
 
 ---
 
-**版本：** 1.4.0
-**最後更新：** 2026-02-18
+**版本：** 1.5.0
+**最後更新：** 2026-02-19
 **適用專案：** 多階段 AI Workflow（報告生成、內容分析、數據處理等）

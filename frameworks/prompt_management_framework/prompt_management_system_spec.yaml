@@ -15,16 +15,16 @@
 #   本規格基於「台美 ETF 淨流量分析月報」專案的實際經驗編寫，
 #   已在生產環境驗證可行性。
 #
-# 🔖 版本：v1.4.0 (2026-02-18)
+# 🔖 版本：v1.5.0 (2026-02-19)
 # ============================================================================
 
 metadata:
   name: "Prompt Management System"
-  version: "1.4.0"
-  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性、輸入驗證"
+  version: "1.5.0"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性、輸入驗證、Stage 間統一讀取"
   author: "John1106John"
   created_at: "2026-02-09"
-  updated_at: "2026-02-18"
+  updated_at: "2026-02-19"
   license: "MIT"
   compatibility:
     - "多階段 AI Workflow"
@@ -80,6 +80,13 @@ architecture:
         ↑ UI 預覽呼叫（prompt_texts=edited_dict，用 UI 編輯中的文字）
     → 確保預覽與執行 100% 使用相同的組裝邏輯
 
+    ⭐ Stage 間依賴統一讀取（stage_io 模式）：
+    utils/stage_io.py 中的 read_stage_output(stage_num, year, month)
+        ↑ build_prompts() 內部呼叫（讀取前置 stage 輸出）
+        ↑ 不論從 UI 預覽、UI 執行、CLI、一鍵 workflow 觸發
+    → 統一解析活動版本 vs temp/ 檔案，取較新者
+    → 確保所有觸發路徑讀到相同資料
+
   components:
     - name: PromptManager
       role: 後端核心類別
@@ -117,6 +124,14 @@ architecture:
         - 管理 active version（追蹤哪個版本是當前使用的）
         - 切換/刪除版本
         - 最終組裝時可選擇各 stage 的特定版本
+
+    - name: StageOutputReader
+      role: Stage 間依賴的統一讀取模組
+      responsibilities:
+        - 提供 read_stage_output(stage_num, year, month) 單一讀取函數
+        - 解析活動版本（UI 選定的 ★ 版本）與 temp/ 檔案的優先順序
+        - 比較時間戳，取較新的檔案內容
+        - 被所有 build_prompts() 內部使用，確保所有觸發路徑讀到相同資料
 
 # ============================================================================
 # 目錄結構
@@ -755,14 +770,18 @@ build_prompts_pattern:
       description: "部分 prompt 依賴前序 API 結果的 stage（如 Stage 7）"
       code: |
         ```python
+        from utils.stage_io import read_stage_output  # ⭐ 統一讀取函數
+
         PROMPT_US = """總結美國市場...\n{{us_full}}"""
         PROMPT_TW = """總結台灣市場...\n{{tw_full}}"""
         PROMPT_OVERALL = """整體總結...\n{{us_conclusion}}\n{{tw_conclusion}}"""
 
         def build_prompts(year, month, prompt_texts=None):
             texts = prompt_texts or {}
-            # 讀取前置 stage 輸出
-            stage1 = read_file(f"stage1_output_{year}{month:02d}.md")
+            # ⭐ 使用 read_stage_output() 統一讀取前置 stage 輸出
+            # 不論從 UI 預覽、UI 執行、CLI、一鍵 workflow 觸發，
+            # 都走同一個函數、讀同一個資料來源
+            stage1 = read_stage_output(1, year, month)
 
             # Prompt 1-2: 可完整替換
             p_us = texts.get('PROMPT_US', PROMPT_US)
@@ -799,8 +818,9 @@ build_prompts_pattern:
     code: |
       ```python
       def get_build_prompts_fn(stage_num):
-          """動態取得 stage 腳本的 build_prompts 函數"""
+          """動態取得 stage 腳本的 build_prompts 函數（每次強制 reload）"""
           import importlib
+          import sys as _sys
           module_map = {
               1: "scripts.stages.stage1_xxx",
               2: "scripts.stages.stage2_yyy",
@@ -808,7 +828,13 @@ build_prompts_pattern:
           }
           if stage_num not in module_map:
               return None
-          mod = importlib.import_module(module_map[stage_num])
+          module_name = module_map[stage_num]
+          # ⚠️ 必須 reload：importlib 會快取 module，
+          # 若 UI 編輯腳本後不 reload，build_prompts 仍用舊邏輯
+          if module_name in _sys.modules:
+              mod = importlib.reload(_sys.modules[module_name])
+          else:
+              mod = importlib.import_module(module_name)
           return mod.build_prompts
 
       # 完整預覽按鈕 handler
@@ -850,6 +876,160 @@ build_prompts_pattern:
           改為呼叫 get_build_prompts_fn(stage_num)(year, month, prompt_texts=edited)
       - step: "5. 測試"
         detail: "確認 UI 完整預覽與腳本執行的 prompt 內容一致"
+
+# ============================================================================
+# Stage 間依賴的統一讀取機制（Unified Stage Output Reading）
+# ============================================================================
+
+stage_output_reading:
+  design_principle: |
+    ⭐ **核心理念**：當 Stage 間存在依賴關係（如 Stage 4 讀取 Stage 3 輸出），
+    所有觸發路徑（UI 預覽、UI 執行、CLI 執行、一鍵 workflow）
+    必須使用同一個函數讀取同一個資料來源。
+
+    問題背景：
+    - UI 預覽在 build_prompts() 中直接讀取 temp/ 檔案
+    - UI「文字輸入（前置 Stage 輸出）」顯示活動版本（★）的內容
+    - 兩者可能是不同檔案，導致預覽與 UI 顯示不一致 ❌
+    - 一鍵 workflow 若優先讀取舊的活動版本，會忽略剛生成的 temp/ 檔案 ❌
+
+    解決方案：
+    - 建立 utils/stage_io.py，提供 read_stage_output() 單一讀取函數
+    - 所有 build_prompts() 內部統一呼叫此函數
+    - 函數內部比較活動版本與 temp/ 的時間戳，取較新者
+    - 不論從哪裡觸發，都走同一條讀取路徑 ✅
+
+  module:
+    file: "utils/stage_io.py"
+    description: "Stage 輸出讀取工具 — 統一讀取邏輯"
+
+  function:
+    name: "read_stage_output"
+    signature: "read_stage_output(stage_num: int, year: int, month: int) -> str"
+    parameters:
+      stage_num: "Stage 編號（1-7）"
+      year: "年份"
+      month: "月份"
+    returns: "Stage 輸出內容（str），若不存在回傳空字串"
+
+  resolution_logic: |
+    判斷邏輯（時間戳比較）：
+
+    | 活動版本           | temp/ 檔案         | 結果           |
+    |--------------------|--------------------|----------------|
+    | 存在（較新）        | 存在（較舊）        | 用活動版本     |
+    | 存在（較舊）        | 存在（較新）        | 用 temp/       |
+    | 存在               | 不存在              | 用活動版本     |
+    | 不存在              | 存在               | 用 temp/       |
+    | 不存在              | 不存在              | 回傳空字串     |
+
+    活動版本路徑：temp/active_versions_{YYYYMM}.json → temp/versions/{YYYYMM}/stage{N}/{vid}.md
+    temp/ 檔案路徑：temp/{output_prefix}_{YYYYMM}.md
+
+  usage_scenarios:
+    workflow: |
+      一鍵 workflow：每個 Stage 執行完寫入 temp/ 後時間戳最新，
+      下一個 Stage 呼叫 read_stage_output() 自然讀到剛生成的結果。
+    ui_preview: |
+      UI 選定活動版本後預覽：活動版本的時間戳較新，
+      read_stage_output() 自動讀取使用者選定的版本。
+    ui_execution: |
+      UI 執行 Stage 後：temp/ 檔案剛寫入，時間戳最新，
+      read_stage_output() 讀到最新結果。
+
+  implementation:
+    code: |
+      ```python
+      # utils/stage_io.py
+      import json
+      from pathlib import Path
+
+      project_root = Path(__file__).parent.parent
+
+      STAGE_OUTPUT_PREFIX = {
+          1: "stage1_xxx",
+          2: "stage2_yyy",
+          3: "stage3_zzz",
+          # ... 依專案定義
+      }
+
+      def _get_active_version_path(stage_num, prefix):
+          """取得活動版本檔案路徑"""
+          active_path = project_root / "temp" / f"active_versions_{prefix}.json"
+          if not active_path.exists():
+              return None
+          try:
+              active = json.loads(active_path.read_text(encoding='utf-8'))
+              vid = active.get(str(stage_num))
+              if vid:
+                  vf = project_root / "temp" / "versions" / prefix / f"stage{stage_num}" / f"{vid}.md"
+                  if vf.exists():
+                      return vf
+          except Exception:
+              pass
+          return None
+
+      def _get_temp_path(stage_num, prefix):
+          """取得 temp/ 檔案路徑"""
+          output_prefix = STAGE_OUTPUT_PREFIX.get(stage_num)
+          if not output_prefix:
+              return None
+          temp_file = project_root / "temp" / f"{output_prefix}_{prefix}.md"
+          if temp_file.exists():
+              return temp_file
+          return None
+
+      def read_stage_output(stage_num, year, month):
+          """
+          讀取指定 Stage 的輸出。
+          若活動版本和 temp/ 都存在，取較新的；否則取存在的那個。
+          """
+          prefix = f"{year}{month:02d}"
+          version_path = _get_active_version_path(stage_num, prefix)
+          temp_path = _get_temp_path(stage_num, prefix)
+
+          # 兩者都存在 → 比較時間戳
+          if version_path and temp_path:
+              if temp_path.stat().st_mtime >= version_path.stat().st_mtime:
+                  return temp_path.read_text(encoding='utf-8')
+              else:
+                  return version_path.read_text(encoding='utf-8')
+
+          if version_path:
+              return version_path.read_text(encoding='utf-8')
+          if temp_path:
+              return temp_path.read_text(encoding='utf-8')
+          return ""
+      ```
+
+  benefits:
+    - "✅ 所有觸發路徑讀到相同資料：UI 預覽、UI 執行、CLI、一鍵 workflow"
+    - "✅ 自動解析版本優先順序：時間戳比較，無需手動指定"
+    - "✅ 向後相容：沒有活動版本時自動回退到 temp/ 檔案"
+    - "✅ Workflow 不受舊版本干擾：剛生成的 temp/ 時間戳一定最新"
+    - "✅ 單一維護點：修改讀取邏輯只需改 stage_io.py"
+
+  migration_guide:
+    steps:
+      - step: "1. 建立 utils/stage_io.py"
+        detail: "定義 STAGE_OUTPUT_PREFIX 對應表和 read_stage_output() 函數"
+      - step: "2. 在有依賴的 stage 中 import 並使用"
+        detail: |
+          from utils.stage_io import read_stage_output
+          stage3_output = read_stage_output(3, year, month)
+      - step: "3. 移除各 stage 自己的 load_xxx_output() 函數"
+        detail: "刪除 stage 腳本中各自實作的讀取邏輯，統一走 read_stage_output()"
+      - step: "4. 移除 UI 中的 dep_outputs / apply_dep_versions 等間接傳遞機制"
+        detail: |
+          不再需要 UI 從外部傳入依賴資料，
+          build_prompts() 內部直接呼叫 read_stage_output()。
+      - step: "5. 測試各觸發路徑"
+        detail: |
+          確認以下場景讀到相同資料：
+          - UI 預覽（動態預覽按鈕）
+          - UI 執行（subprocess）
+          - CLI 執行（python stage4.py --year 2025 --month 12）
+          - 一鍵 workflow（run_complete_workflow.py）
 
 # ============================================================================
 # 輸入驗證（Input Validation / Pre-flight Check）
@@ -1493,6 +1673,34 @@ known_pitfalls:
       在 main() 開頭和 Workflow 中統一呼叫。
       區分 ERROR（必要）和 WARNING（可選），讓使用者提前了解缺失。
       （詳見 input_validation 章節）
+
+  - issue: "Stage 間依賴讀取的資料來源不一致"
+    description: |
+      當 Stage 有依賴關係（如 Stage 4 讀取 Stage 3 輸出）時，
+      不同觸發路徑可能讀到不同資料：
+      - UI 預覽中的 build_prompts() 讀取 temp/ 檔案
+      - UI「文字輸入」區顯示活動版本（★）的內容
+      - 一鍵 workflow 寫入 temp/ 但舊的活動版本可能較新
+      導致 UI 預覽與顯示不一致、workflow 讀取到舊版本 ❌
+    solution: |
+      ⭐ 根本解法：建立 utils/stage_io.py，提供 read_stage_output() 單一函數。
+      所有 build_prompts() 內部統一呼叫此函數，
+      函數比較活動版本與 temp/ 的時間戳，自動取較新者。
+      （詳見 stage_output_reading 章節）
+
+  - issue: "importlib 快取導致 UI reload 後仍用舊的 build_prompts()"
+    description: |
+      Streamlit UI 使用 importlib.import_module() 動態載入 stage 腳本。
+      import_module() 會快取 module 在 sys.modules 中，
+      即使腳本檔案已修改，後續 import 仍返回快取的舊版本。
+      導致 UI 預覽使用舊的 build_prompts() 邏輯。
+    solution: |
+      在 get_build_prompts_fn() 中，檢查 module 是否已在 sys.modules，
+      若已存在則使用 importlib.reload() 強制重新載入：
+        if module_name in sys.modules:
+            mod = importlib.reload(sys.modules[module_name])
+        else:
+            mod = importlib.import_module(module_name)
 
 # ============================================================================
 # 給 AI 的建構指引
