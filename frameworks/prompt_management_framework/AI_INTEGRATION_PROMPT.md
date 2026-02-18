@@ -130,16 +130,42 @@ def main(year, month):
     VersionManager().snapshot_output(stage_num=1, output_md=result, version_id=f"v{timestamp}")
 ```
 
-### 步驟 8：建立測試腳本
+### 步驟 8：新增輸入驗證（Input Validation）
+為每個 Stage 腳本新增 check_inputs() 函數，並在 Workflow 中統一呼叫：
+1. 每個 Stage 腳本新增 check_inputs(year, month)：
+   - 檢查圖片、Excel、前置 Stage 輸出是否存在
+   - 回傳 list[(level, message)]，level 為 'ERROR' 或 'WARNING'
+   - ERROR 表示必要輸入（缺少會導致失敗）
+   - WARNING 表示可選輸入（缺少不影響執行）
+2. 在每個 Stage 的 main() 開頭呼叫 check_inputs() 並印出結果
+3. 在 Workflow 中用 run_input_check(check_fn, year, month) 統一呼叫
+4. 對依賴前置 Stage 的場景，考慮自動補跑缺失依賴
+
+範例：
+```python
+def check_inputs(year, month):
+    """檢查所有輸入是否存在，回傳 [(level, message), ...]"""
+    issues = []
+    prefix = f"{year}{month:02d}"
+    img = project_root / "images" / f"chart_{prefix}.png"
+    if not img.exists():
+        issues.append(("ERROR", f"圖片不存在: {img.name}"))
+    return issues
+```
+
+參考：prompt_management_system_spec.yaml 的 input_validation 章節
+
+### 步驟 9：建立測試腳本
 建立 test_prompt_manager.py：
 1. 測試 Prompt 提取（從 .py 腳本）
 2. 測試 JSON 快取讀寫
 3. 測試寫回腳本功能
 4. 測試備份和還原
 5. 測試共用資料格式化模組
-6. 輸出測試結果
+6. 測試 check_inputs() 輸入驗證（缺少圖片/Excel/前置輸出）
+7. 輸出測試結果
 
-### 步驟 9：整合報告
+### 步驟 10：整合報告
 完成後，請提供：
 1. 建立了哪些新檔案（列出路徑）
 2. 修改了哪些現有檔案
@@ -305,6 +331,6 @@ Stage 腳本目錄：[如 scripts/stages/]
 
 ---
 
-**版本：** 1.3.0
-**最後更新：** 2026-02-17
+**版本：** 1.4.0
+**最後更新：** 2026-02-18
 **適用專案：** 多階段 AI Workflow（報告生成、內容分析、數據處理等）

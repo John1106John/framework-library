@@ -15,16 +15,16 @@
 #   本規格基於「台美 ETF 淨流量分析月報」專案的實際經驗編寫，
 #   已在生產環境驗證可行性。
 #
-# 🔖 版本：v1.0 (2026-02-09)
+# 🔖 版本：v1.4.0 (2026-02-18)
 # ============================================================================
 
 metadata:
   name: "Prompt Management System"
-  version: "1.3.0"
-  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性"
+  version: "1.4.0"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性、輸入驗證"
   author: "John1106John"
   created_at: "2026-02-09"
-  updated_at: "2026-02-17"
+  updated_at: "2026-02-18"
   license: "MIT"
   compatibility:
     - "多階段 AI Workflow"
@@ -852,6 +852,246 @@ build_prompts_pattern:
         detail: "確認 UI 完整預覽與腳本執行的 prompt 內容一致"
 
 # ============================================================================
+# 輸入驗證（Input Validation / Pre-flight Check）
+# ============================================================================
+
+input_validation:
+  design_principle: |
+    ⭐ **核心理念**：每個 Stage 腳本提供一個 check_inputs() 函數，
+    在執行前檢查所有必要輸入（圖片、Excel、前置 Stage 輸出）是否存在。
+    Workflow 在啟動每個 Stage 前呼叫此函數，提前警告缺少的輸入。
+
+    問題背景：
+    - Stage 腳本在執行中途才發現輸入不存在，浪費 API 呼叫和時間
+    - 缺少上月數據時，Stage 直接失敗，沒有提前警告
+    - 不同 Stage 的錯誤處理不一致
+
+    解決方案：
+    - 每個 Stage 腳本新增 check_inputs(year, month) 函數
+    - 區分 ERROR（必要輸入，缺少會導致失敗）和 WARNING（可選輸入）
+    - Workflow 在每個 Stage 前統一呼叫檢查
+    - 個別執行 Stage 時也在 main() 開頭呼叫
+
+  function_signature:
+    name: "check_inputs"
+    parameters:
+      year: "int — 目標年份"
+      month: "int — 目標月份"
+    returns: |
+      list[tuple[str, str]] — [(level, message), ...]
+        level: 'ERROR'（必要輸入，缺少會導致失敗）
+               'WARNING'（可選輸入，缺少不影響執行）
+
+  input_categories:
+    images:
+      description: "圖片檔案（PNG 等），通常是 multimodal API 的必要輸入"
+      typical_level: "ERROR"
+      example: |
+        img = project_root / "images" / f"chart_{prefix}.png"
+        if not img.exists():
+            issues.append(("ERROR", f"圖片不存在: {img.name}"))
+
+    excel_data:
+      description: "Excel 資料檔案"
+      typical_level: "WARNING 或 ERROR，視是否有備用資料來源（如圖片）"
+      example: |
+        excel = project_root / "data" / f"data_{prefix}.xlsx"
+        if not excel.exists():
+            issues.append(("WARNING", f"Excel 不存在: {excel.name}"))
+
+    stage_outputs:
+      description: "前置 Stage 的輸出檔案（.md）"
+      typical_level: "當月必要輸出 → ERROR；上月對比用 → WARNING"
+      example: |
+        curr = project_root / "temp" / f"stage3_output_{prefix}.md"
+        if not curr.exists():
+            issues.append(("ERROR", f"Stage 3 當月輸出不存在: {curr.name}"))
+
+        prev = project_root / "temp" / f"stage3_output_{prev_prefix}.md"
+        if not prev.exists():
+            issues.append(("WARNING", f"Stage 3 上月輸出不存在: {prev.name}（MoM 對比將缺少上月資料）"))
+
+  examples:
+    simple_stage:
+      description: "只需要一張圖片的 Stage"
+      code: |
+        ```python
+        def check_inputs(year, month):
+            """檢查所有輸入是否存在，回傳 [(level, message), ...]"""
+            issues = []
+            prefix = f"{year}{month:02d}"
+
+            img = project_root / "images" / f"us_etf_top10_flows_{prefix}.png"
+            if not img.exists():
+                issues.append(("ERROR", f"圖片不存在: {img.name}"))
+
+            return issues
+        ```
+
+    multi_input_stage:
+      description: "需要多種輸入的 Stage（圖片 + Excel + 上月對比）"
+      code: |
+        ```python
+        def check_inputs(year, month):
+            issues = []
+            prefix = f"{year}{month:02d}"
+            prev_month = month - 1 if month > 1 else 12
+            prev_year = year if month > 1 else year - 1
+            prev_prefix = f"{prev_year}{prev_month:02d}"
+
+            # 圖片（必要）
+            for p in [f"chart_{prefix}.png", f"chart_{prev_prefix}.png"]:
+                if not (project_root / "images" / p).exists():
+                    issues.append(("ERROR", f"圖片不存在: {p}"))
+
+            # Excel（有備用資料來源，為 WARNING）
+            excel = project_root / "data" / "data.xlsx"
+            if not excel.exists():
+                issues.append(("WARNING", f"Excel 不存在: {excel.name}"))
+
+            return issues
+        ```
+
+    dependent_stage:
+      description: "依賴前置 Stage 輸出的 Stage（如 MoM 對比）"
+      code: |
+        ```python
+        def check_inputs(year, month):
+            issues = []
+            prefix = f"{year}{month:02d}"
+            prev_month = month - 1 if month > 1 else 12
+            prev_year = year if month > 1 else year - 1
+            prev_prefix = f"{prev_year}{prev_month:02d}"
+
+            # 當月 Stage 3 輸出（必要）
+            curr = project_root / "temp" / f"stage3_output_{prefix}.md"
+            if not curr.exists():
+                issues.append(("ERROR", f"Stage 3 當月輸出不存在: {curr.name}"))
+
+            # 上月 Stage 3 輸出（MoM 對比用，非必要）
+            prev = project_root / "temp" / f"stage3_output_{prev_prefix}.md"
+            if not prev.exists():
+                issues.append(("WARNING",
+                    f"Stage 3 上月輸出不存在: {prev.name}（MoM 對比將缺少上月資料）"))
+
+            return issues
+        ```
+
+    summary_stage:
+      description: "彙整多個前置 Stage 輸出的 Stage（如最終總結）"
+      code: |
+        ```python
+        def check_inputs(year, month):
+            issues = []
+            prefix = f"{year}{month:02d}"
+            temp_dir = project_root / "temp"
+
+            # 必要輸出（缺少會嚴重影響品質）
+            required = {
+                1: f"stage1_output_{prefix}.md",
+                4: f"stage4_output_{prefix}.md",
+            }
+            for sn, fname in required.items():
+                if not (temp_dir / fname).exists():
+                    issues.append(("ERROR", f"Stage {sn} 輸出不存在: {fname}"))
+
+            # 可選輸出（缺少會影響完整性但不致失敗）
+            optional = {
+                2: f"stage2_output_{prefix}.md",
+                3: f"stage3_output_{prefix}.md",
+                5: f"stage5_output_{prefix}.md",
+                6: f"stage6_output_{prefix}.md",
+            }
+            for sn, fname in optional.items():
+                if not (temp_dir / fname).exists():
+                    issues.append(("WARNING", f"Stage {sn} 輸出不存在: {fname}"))
+
+            return issues
+        ```
+
+  workflow_integration:
+    description: |
+      Workflow 腳本在啟動每個 Stage 前呼叫 check_inputs()，統一印出檢查結果。
+    helper_function: |
+      ```python
+      def run_input_check(check_fn, year, month, logger=None):
+          """執行輸入檢查並印出結果，回傳是否有 ERROR"""
+          issues = check_fn(year, month)
+          if not issues:
+              print("[CHECK] 所有輸入就緒")
+              return False
+          for level, msg in issues:
+              print(f"  [{level}] {msg}")
+          has_error = any(level == "ERROR" for level, _ in issues)
+          if logger and issues:
+              logger.info(f"Input check: {len(issues)} issue(s), has_error={has_error}")
+          return has_error
+      ```
+    usage: |
+      ```python
+      from scripts.stages.stage1_xxx import check_inputs as stage1_check
+      from scripts.stages.stage2_yyy import check_inputs as stage2_check
+      # ... 以此類推
+
+      # 在每個 Stage 執行前
+      print("[Stage 1] 輸入檢查...")
+      run_input_check(stage1_check, year, month, logger)
+      # 繼續執行（stages 內部已有各自的錯誤處理）
+      ```
+
+  stage_integration:
+    description: |
+      每個 Stage 的 main() 在開頭呼叫 check_inputs() 並印出警告，
+      但不中斷執行（讓後續程式碼自行處理缺失）。
+    code: |
+      ```python
+      def main(year=2025, month=12):
+          print(f"[Stage N] XXX ({year}年{month}月)")
+          print("-" * 60)
+
+          for level, msg in check_inputs(year, month):
+              print(f"  [{level}] {msg}")
+
+          # ... 後續邏輯（stage 內部已有 if not exists 的處理）
+      ```
+
+  auto_run_dependencies:
+    description: |
+      對於依賴前置 Stage 輸出的 Stage，Workflow 可自動補跑缺失的依賴。
+      常見場景：某個 Stage 需要上個月的前置 Stage 輸出做 MoM 對比，
+      但使用者只跑了當月流程，上個月的輸出不存在。
+    code: |
+      ```python
+      # 在 Stage N 之前，檢查並自動補跑上月依賴
+      from datetime import datetime, timedelta
+
+      prev_date = datetime(year, month, 1) - timedelta(days=1)
+      prev_year, prev_month = prev_date.year, prev_date.month
+      prev_output = work_dir / "temp" / f"stage3_output_{prev_year}{prev_month:02d}.md"
+
+      if not prev_output.exists():
+          print(f"[AUTO] 上月 Stage 3 輸出不存在，自動補跑...")
+          stage3_main(prev_year, prev_month)
+      ```
+
+  benefits:
+    - "✅ 提前警告：在 API 呼叫前就發現缺失輸入"
+    - "✅ 區分嚴重程度：ERROR vs WARNING 讓使用者了解影響範圍"
+    - "✅ 一致的介面：所有 Stage 使用相同的 check_inputs(year, month) 簽名"
+    - "✅ 雙重整合：Workflow 統一檢查 + 個別 Stage 各自檢查"
+    - "✅ 不阻斷執行：檢查結果僅為警告，stage 內部自行決定是否中斷"
+    - "✅ 可擴展：新增輸入類型只需修改對應 stage 的 check_inputs()"
+
+  best_practices:
+    - "每個 Stage 都應有 check_inputs()，即使只有一個輸入"
+    - "ERROR 用於必要輸入（缺少會導致 API 失敗或結果品質極差）"
+    - "WARNING 用於可選輸入（缺少會影響完整性但不致失敗）"
+    - "Workflow 的 run_input_check() 不應阻止 Stage 執行"
+    - "check_inputs() 應快速執行（只檢查檔案存在性，不讀取內容）"
+    - "上月對比用的數據通常為 WARNING，當月必要數據為 ERROR"
+    - "前置 Stage 輸出中，核心段落用 ERROR，補充段落用 WARNING"
+
+# ============================================================================
 # UI 整合設計（Streamlit）
 # ============================================================================
 
@@ -1243,6 +1483,17 @@ known_pitfalls:
       用 st.session_state.get(key, default) 取得初始值，
       再把 key 同時作為 text_area 的 key，讓 Streamlit 自動管理。
 
+  - issue: "缺少輸入驗證導致 Stage 執行中途失敗"
+    description: |
+      沒有 pre-flight check，Stage 在 API 呼叫後才發現輸入不存在，
+      浪費 API 額度和時間。尤其是依賴前置 Stage 輸出的 Stage，
+      當上月資料不存在時直接失敗，沒有任何提前警告。
+    solution: |
+      ⭐ 每個 Stage 腳本新增 check_inputs(year, month) 函數，
+      在 main() 開頭和 Workflow 中統一呼叫。
+      區分 ERROR（必要）和 WARNING（可選），讓使用者提前了解缺失。
+      （詳見 input_validation 章節）
+
 # ============================================================================
 # 給 AI 的建構指引
 # ============================================================================
@@ -1288,7 +1539,18 @@ ai_implementation_guide:
       - UI 和 main() 共用同一個函數
       （詳見 build_prompts_pattern 章節）
 
-  step_5_integrate_ui:
+  step_5_add_input_validation:
+    description: |
+      ⭐ 為每個 stage 腳本新增 check_inputs() 函數：
+      - 函數簽名：check_inputs(year, month) → list[(level, message)]
+      - 檢查所有必要輸入（圖片、Excel、前置 Stage 輸出）是否存在
+      - 區分 ERROR（必要）和 WARNING（可選）
+      - 在 main() 開頭呼叫並印出結果
+      - 在 Workflow 中用 run_input_check() 統一呼叫
+      - 依賴前置 Stage 的場景可自動補跑缺失依賴
+      （詳見 input_validation 章節）
+
+  step_6_integrate_ui:
     description: |
       在 Streamlit UI 中整合：
       - 定義 STAGE_META 配置（所有 stage 都設 prompt_key，不再設 None）
@@ -1304,7 +1566,7 @@ ai_implementation_guide:
       - 創建三種安全啟動腳本（安全/內網/開放模式）
       - 配置 .streamlit/config.toml 安全選項
 
-  step_6_test:
+  step_7_test:
     description: |
       測試要點：
       - 從腳本提取 prompt → 編輯 → 儲存草稿 → 載入草稿 → 刪除草稿
@@ -1318,6 +1580,11 @@ ai_implementation_guide:
         - 修改 prompt → Baseline 比較顯示「⚠️ 與 Baseline 不同」
         - 從 Baseline 還原 → 確認腳本回復到 baseline 版本
         - 草稿記錄中 Baseline 置頂 → 只有載入按鈕、無刪除按鈕
+      - 輸入驗證測試：
+        - 缺少圖片 → check_inputs() 回傳 ERROR
+        - 缺少 Excel → check_inputs() 回傳 WARNING
+        - 缺少前置 Stage 輸出 → check_inputs() 回傳 ERROR
+        - Workflow 中 run_input_check() 正確印出所有檢查結果
 
 # ============================================================================
 # 快速開始範例
