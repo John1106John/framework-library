@@ -32,7 +32,7 @@
     {
       "id": "prompt-management",
       "name": "Prompt 管理系統",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "description": "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽一致性、輸入驗證、Stage 間統一讀取",
       "author": "John1106John",
       "created_at": "2026-02-09",

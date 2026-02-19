@@ -118,28 +118,35 @@ STAGE_OUTPUT_PREFIX = {
     # ...
 }
 
-def read_stage_output(stage_num, year, month):
-    """統一讀取 Stage 輸出：比較活動版本與 temp/ 的時間戳，取較新者"""
+def read_stage_output(stage_num, year, month, source='active'):
+    """
+    統一讀取 Stage 輸出。
+    source='active'（預設）：活動版本（★）優先，回退 temp/（UI 用）
+    source='temp'：只讀 temp/（一鍵 workflow 用）
+    """
     prefix = f"{year}{month:02d}"
-    version_path = _get_active_version_path(stage_num, prefix)
-    temp_path = _get_temp_path(stage_num, prefix)
 
-    if version_path and temp_path:
-        if temp_path.stat().st_mtime >= version_path.stat().st_mtime:
+    if source == 'temp':
+        temp_path = _get_temp_path(stage_num, prefix)
+        if temp_path:
             return temp_path.read_text(encoding='utf-8')
-        else:
-            return version_path.read_text(encoding='utf-8')
+        return ""
+
+    # Active 模式：活動版本優先，尊重使用者選定的版本
+    version_path = _get_active_version_path(stage_num, prefix)
     if version_path:
         return version_path.read_text(encoding='utf-8')
+    temp_path = _get_temp_path(stage_num, prefix)
     if temp_path:
         return temp_path.read_text(encoding='utf-8')
     return ""
 ```
 
 設計原則：
-- 所有 build_prompts() 內部使用 read_stage_output() 讀取前置 Stage 輸出
+- 所有 build_prompts(dep_source) 內部使用 read_stage_output(source=dep_source) 讀取前置 Stage 輸出
 - 不從 UI 外部傳入依賴資料，避免多條讀取路徑
-- 時間戳比較確保一鍵 workflow 讀到最新結果、UI 選定版本後也能正確讀取
+- source='active'（UI）尊重使用者用 ★ 選定的活動版本；source='temp'（workflow）只讀剛生成的結果
+- dep_source 參數鏈：main(dep_source) → build_prompts(dep_source) → read_stage_output(source=dep_source)
 
 參考：prompt_management_system_spec.yaml 的 stage_output_reading 章節
 
@@ -242,7 +249,7 @@ Stage 腳本目錄：[如 scripts/stages/]
 1. 建立目錄結構（prompts/, prompts/backups/, utils/）
 2. 建立 utils/prompt_manager.py（Prompt 提取、JSON 快取、寫回腳本）
 3. 建立 utils/data_formatter.py（共用資料格式化模組）
-4. 建立 utils/stage_io.py（Stage 間依賴統一讀取，時間戳比較）
+4. 建立 utils/stage_io.py（Stage 間依賴統一讀取，source 參數分派）
 5. 掃描 Stage 腳本，提取所有 PROMPT 常數
 6. 整合到現有 Streamlit UI 或建立新 UI
 7. 建立測試腳本驗證功能
@@ -365,9 +372,10 @@ Stage 腳本目錄：[如 scripts/stages/]
 
 ### 5. Stage 間統一讀取（Unified Stage Output Reading）
 - Stage 間有依賴時，所有觸發路徑必須用同一個函數讀取
-- utils/stage_io.py 提供 read_stage_output() 單一讀取入口
-- 時間戳比較：活動版本 vs temp/，自動取較新者
-- 確保 UI 預覽、UI 執行、CLI、一鍵 workflow 讀到相同資料
+- utils/stage_io.py 提供 read_stage_output(source) 單一讀取入口
+- source='active'（UI）：活動版本（★）優先，回退 temp/
+- source='temp'（workflow）：只讀 temp/，忽略活動版本
+- dep_source 參數鏈：main → build_prompts → read_stage_output
 
 ---
 
@@ -381,6 +389,6 @@ Stage 腳本目錄：[如 scripts/stages/]
 
 ---
 
-**版本：** 1.5.0
+**版本：** 1.5.1
 **最後更新：** 2026-02-19
 **適用專案：** 多階段 AI Workflow（報告生成、內容分析、數據處理等）
