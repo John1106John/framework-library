@@ -21,7 +21,7 @@
 metadata:
   name: "Prompt Management System"
   version: "1.6.0"
-  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性、輸入驗證、Stage 間統一讀取、Workflow 結果摘要"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、Prompt 組切換、預覽執行一致性、輸入驗證、Stage 間統一讀取、Workflow 結果摘要"
   author: "John1106John"
   created_at: "2026-02-09"
   updated_at: "2026-02-24"
@@ -105,6 +105,16 @@ architecture:
         - 從 baseline 還原腳本（自動備份後覆蓋）
         - Baseline 不可刪除，僅能覆蓋更新
 
+    - name: Prompt Set Manager (PromptManager 內建)
+      role: Prompt 組（整套 prompt）管理
+      responsibilities:
+        - 列出所有已存的 prompt 組（sets/baseline/ 自動從 baselines/ 建立）
+        - 儲存目前所有 stage 腳本的 prompt 為一組（命名儲存）
+        - 一鍵套用整組 prompt 到所有 stage 腳本（自動備份）
+        - 預覽組內容（逐 stage 顯示 prompt key + 前 150 字 + 與目前腳本差異比較）
+        - 刪除自訂組（baseline 組不可刪除）
+        - 重新命名組
+
     - name: UI Prompt Editor (Streamlit)
       role: 前端互動介面
       responsibilities:
@@ -144,6 +154,8 @@ directory_structure:
   layout:
     prompts/: "JSON 快取，每個 stage 一個檔案"
     prompts/baselines/: "Baseline 基準版本（不可刪除，僅能覆蓋更新）"
+    prompts/sets/: "Prompt 組（每個子資料夾為一組，含 stage1.json ~ stage7.json）"
+    prompts/sets/baseline/: "自動從 baselines/ 複製建立的預設組（不可刪除）"
     prompts/backups/: "自動備份（.json 和 .py），修改前自動建立"
     prompts/drafts/: "UI 暫存草稿，不影響實際執行，可刪除"
     temp/versions/{YYYYMM}/stage{N}/: "輸出版本快照"
@@ -151,6 +163,7 @@ directory_structure:
   file_naming:
     json_cache: "stage{N}_prompts.json"
     baseline: "stage{N}_baseline.json"
+    prompt_set: "sets/{set_name}/stage{N}.json"
     draft: "stage{N}_{YYYYMMDD_HHMMSS}.json"
     backup_json: "stage{N}_prompts_{YYYYMMDD_HHMMSS}.json"
     backup_script: "{script_stem}_{YYYYMMDD_HHMMSS}.py"
@@ -373,16 +386,18 @@ prompt_manager_class:
     parameters: []
     initialization:
       - "推導 project_root（通常 Path(__file__).parent.parent）"
-      - "建立 prompts_dir、backup_dir 和 baseline_dir"
+      - "建立 prompts_dir、backup_dir、baseline_dir 和 sets_dir"
       - "定義 prompt_files 映射表：stage 名稱 → {json 路徑, 腳本路徑}"
     example: |
       self.project_root = Path(__file__).parent.parent
       self.prompts_dir = self.project_root / "prompts"
       self.backup_dir = self.prompts_dir / "backups"
       self.baseline_dir = self.prompts_dir / "baselines"
+      self.sets_dir = self.prompts_dir / "sets"
       self.prompts_dir.mkdir(exist_ok=True)
       self.backup_dir.mkdir(exist_ok=True)
       self.baseline_dir.mkdir(exist_ok=True)
+      self.sets_dir.mkdir(exist_ok=True)
 
   prompt_files_mapping:
     description: |
@@ -581,6 +596,253 @@ prompt_manager_class:
             if not baseline:
                 return False
             return self.update_script_prompts(report_type, baseline)
+
+    # ===== Prompt Set（組）管理方法 =====
+
+    _report_type_for_stage:
+      purpose: "從 Stage 編號反查 report_type 名稱（內部輔助方法）"
+      input: "stage_num (int)"
+      output: "str | None — prompt_files 的 key"
+      example: |
+        def _report_type_for_stage(self, stage_num):
+            for key in self.prompt_files:
+                if self._stage_num(key) == stage_num:
+                    return key
+            return None
+
+    _ensure_baseline_set:
+      purpose: "若 sets/baseline/ 不存在，從 baselines/ 複製建立"
+      logic: |
+        1. 檢查 sets/baseline/ 是否已存在 → 已存在則跳過
+        2. 檢查 baselines/ 是否有任何 stage{N}_baseline.json
+        3. 建立 sets/baseline/ 目錄
+        4. 複製 baselines/stage{N}_baseline.json → sets/baseline/stage{N}.json
+        ⭐ 此方法在 list_prompt_sets() 開頭呼叫，確保 baseline 組一定存在
+
+    list_prompt_sets:
+      purpose: "列出所有 prompt 組名稱"
+      output: "list[str] — 組名列表，baseline 排在第一位"
+      logic: |
+        1. 呼叫 _ensure_baseline_set() 確保 baseline 組存在
+        2. 掃描 sets/ 下所有含有 stage*.json 的子目錄
+        3. 排序後將 baseline 移到第一位
+      example: |
+        def list_prompt_sets(self):
+            self._ensure_baseline_set()
+            names = sorted(
+                d.name for d in self.sets_dir.iterdir()
+                if d.is_dir() and any(d.glob("stage*.json"))
+            )
+            if "baseline" in names:
+                names.remove("baseline")
+                names.insert(0, "baseline")
+            return names
+
+    get_prompt_set:
+      purpose: "讀取一整組 prompt（所有 stage）"
+      input: "set_name (str)"
+      output: |
+        dict: {stage_num(int): {prompt_key: prompt_text, ...}, ...}
+        例如 {1: {"PROMPT": "..."}, 3: {"PROMPT_OVERVIEW": "...", "PROMPT": "..."}}
+      logic: |
+        遍歷 stage 1~7，讀取 sets/{set_name}/stage{N}.json
+      example: |
+        def get_prompt_set(self, set_name):
+            set_dir = self.sets_dir / set_name
+            if not set_dir.exists():
+                return {}
+            result = {}
+            for sn in range(1, 8):  # Stage 1~7
+                fpath = set_dir / f"stage{sn}.json"
+                if fpath.exists():
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        result[sn] = json.load(f)
+            return result
+
+    save_prompt_set:
+      purpose: "將目前各 Stage 腳本的 prompt 儲存為一組"
+      input: "set_name (str)"
+      output: "bool — 是否成功"
+      logic: |
+        1. 建立 sets/{set_name}/ 目錄
+        2. 遍歷 stage 1~7，用 get_prompts() 提取目前腳本的 prompt
+        3. 寫入 sets/{set_name}/stage{N}.json
+        ⭐ 如果同名組已存在，會覆蓋（更新）
+      example: |
+        def save_prompt_set(self, set_name):
+            set_dir = self.sets_dir / set_name
+            set_dir.mkdir(exist_ok=True)
+            saved = 0
+            for sn in range(1, 8):
+                rt = self._report_type_for_stage(sn)
+                if rt is None:
+                    continue
+                prompts = self.get_prompts(rt)
+                if not prompts:
+                    continue
+                fpath = set_dir / f"stage{sn}.json"
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    json.dump(prompts, f, ensure_ascii=False, indent=2)
+                saved += 1
+            return saved > 0
+
+    apply_prompt_set:
+      purpose: "將指定組的所有 prompt 寫入對應 stage 腳本（一鍵套用）"
+      input: "set_name (str)"
+      output: "tuple: (成功數, 失敗數)"
+      logic: |
+        1. 用 get_prompt_set() 讀取整組
+        2. 遍歷組內每個 stage，呼叫 update_script_prompts() 寫入腳本
+        ⭐ update_script_prompts() 內部會自動備份，所以每個 stage 都有備份
+      example: |
+        def apply_prompt_set(self, set_name):
+            prompt_set = self.get_prompt_set(set_name)
+            if not prompt_set:
+                return (0, 0)
+            ok, fail = 0, 0
+            for sn, prompts in prompt_set.items():
+                rt = self._report_type_for_stage(sn)
+                if rt is None:
+                    fail += 1
+                    continue
+                if self.update_script_prompts(rt, prompts):
+                    ok += 1
+                else:
+                    fail += 1
+            return (ok, fail)
+
+    delete_prompt_set:
+      purpose: "刪除一組（禁止刪除 baseline）"
+      input: "set_name (str)"
+      output: "bool — 是否成功"
+      logic: |
+        1. 若 set_name == "baseline" → return False（禁止刪除）
+        2. 刪除 sets/{set_name}/ 整個目錄
+      important_notes:
+        - "baseline 組不可刪除，這是唯一的保護規則"
+        - "使用 shutil.rmtree() 刪除整個目錄"
+
+    rename_prompt_set:
+      purpose: "重新命名一組（禁止重新命名 baseline）"
+      input: "old_name (str), new_name (str)"
+      output: "bool — 是否成功"
+      logic: |
+        1. 若 old_name == "baseline" → return False
+        2. 若 new_name 已存在 → return False
+        3. 重新命名目錄
+
+# ============================================================================
+# Prompt Set 整合到 UI 總覽頁面
+# ============================================================================
+
+prompt_set_ui:
+  description: |
+    在 UI 的總覽（Overview）頁面中提供 Prompt 組管理功能，
+    讓使用者可以一次切換整套 prompt（所有 stage）。
+
+    位置：放在「Stage 進度」和「快速執行」之間。
+
+  layout: |
+    ### 🔀 Prompt 組管理
+    ┌─────────────────────────────────────────────┐
+    │ [selectbox: 選擇 Prompt 組]                  │
+    │                                              │
+    │ [📥 套用此組] [🗑 刪除]                       │
+    │                                              │
+    │ [📋 預覽 expander]                            │
+    │   Stage 1：美國市場摘要  ✅                   │
+    │     PROMPT — 你將扮演一位專業、客觀的...       │
+    │   Stage 2：美國淨流量分析  ⚠️                 │
+    │     PROMPT — 請根據以下圖片分析...             │
+    │   ...                                        │
+    │                                              │
+    │ ── 儲存目前腳本為新組 ──                      │
+    │ [text_input: 組名] [💾 儲存]                  │
+    └─────────────────────────────────────────────┘
+
+  components:
+    - name: "選擇 Prompt 組"
+      widget: "st.selectbox"
+      data_source: "pm.list_prompt_sets()"
+      note: "baseline 永遠排在第一位"
+
+    - name: "套用按鈕"
+      widget: "st.button('📥 套用此組')"
+      action: "pm.apply_prompt_set(selected_set)"
+      note: "一鍵將該組所有 prompt 寫入對應 stage 腳本（自動備份）"
+
+    - name: "刪除按鈕"
+      widget: "st.button('🗑 刪除', disabled=(selected == 'baseline'))"
+      action: "pm.delete_prompt_set(selected_set)"
+      note: "baseline 組的刪除按鈕 disabled，防止誤刪"
+
+    - name: "預覽 expander"
+      widget: "st.expander(f'📋 預覽「{set_name}」組內容')"
+      content: |
+        遍歷 stage 1~7：
+        - 顯示 stage 名稱
+        - 比較組內 prompt 與目前腳本（✅ 一致 / ⚠️ 不同）
+        - 顯示每個 prompt key + 前 150 字預覽
+
+    - name: "儲存新組"
+      widgets:
+        - "st.text_input('新組名稱')"
+        - "st.button('💾 儲存目前腳本為新組')"
+      action: "pm.save_prompt_set(new_name)"
+
+  code_example: |
+    # 在 page_overview() 中加入
+    from utils.prompt_manager import PromptManager
+    _pm = PromptManager()
+    _set_names = _pm.list_prompt_sets()
+
+    if _set_names:
+        _selected = st.selectbox("選擇 Prompt 組", _set_names)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📥 套用此組"):
+                ok, fail = _pm.apply_prompt_set(_selected)
+                if ok > 0:
+                    st.success(f"✅ 已套用「{_selected}」組：{ok} 個 Stage 更新成功")
+        with c2:
+            if st.button("🗑 刪除", disabled=(_selected == "baseline")):
+                if _pm.delete_prompt_set(_selected):
+                    st.success(f"已刪除「{_selected}」組")
+                    st.rerun()
+
+        # 預覽
+        _set_data = _pm.get_prompt_set(_selected)
+        with st.expander(f"📋 預覽「{_selected}」組內容"):
+            for sn in range(1, 8):
+                if sn not in _set_data:
+                    st.caption(f"Stage {sn} — ❌ 缺失")
+                    continue
+                _prompts = _set_data[sn]
+                _rt = _pm._report_type_for_stage(sn)
+                _current = _pm.get_prompts(_rt) if _rt else {}
+                _match = (_prompts == _current)
+                st.markdown(f"**Stage {sn}** {'✅' if _match else '⚠️'}")
+                for pk, pv in _prompts.items():
+                    st.caption(f"`{pk}` — {pv[:150].replace(chr(10), ' ')}...")
+
+    # 儲存新組
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        _name = st.text_input("新組名稱")
+    with c2:
+        if st.button("💾 儲存為新組"):
+            if _name.strip():
+                _pm.save_prompt_set(_name.strip())
+                st.success(f"✅ 已儲存為「{_name.strip()}」組")
+                st.rerun()
+
+  design_notes:
+    - "baseline 組自動從 baselines/ 建立，使用者不需手動操作"
+    - "套用時每個 stage 腳本都會自動備份，可隨時還原"
+    - "Stage Test 不包含在組中（獨立管理）"
+    - "組名可以用任何名稱（如 conservative、aggressive、v2_draft 等）"
+    - "預覽中的 ✅/⚠️ 比較的是組內容與目前腳本，方便判斷是否需要套用"
 
 # ============================================================================
 # 腳本端 Prompt 寫法規範

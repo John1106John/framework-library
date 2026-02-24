@@ -21,6 +21,7 @@
 在專案根目錄建立以下目錄：
 - prompts/（JSON 快取）
 - prompts/baselines/（Baseline 基準版本，不可刪除）
+- prompts/sets/（Prompt 組，每個子資料夾為一組）
 - prompts/backups/（自動備份）
 - prompts/drafts/（UI 草稿暫存，可刪除）
 - temp/versions/{YYYYMM}/（輸出版本快照）
@@ -39,6 +40,11 @@
    - save_baseline(report_type) - 將目前腳本設為 baseline
    - compare_with_baseline(report_type) - 比較目前腳本與 baseline 差異
    - restore_from_baseline(report_type) - 從 baseline 還原腳本
+   - list_prompt_sets() - 列出所有 prompt 組
+   - get_prompt_set(set_name) - 讀取一整組 prompt
+   - save_prompt_set(set_name) - 將目前腳本存為一組
+   - apply_prompt_set(set_name) - 一鍵套用整組到所有腳本
+   - delete_prompt_set(set_name) - 刪除組（baseline 不可刪）
 
 2. 設計原則：
    - Prompt 以 Python 常數形式寫在腳本中（PROMPT_1 = """..."""）
@@ -85,6 +91,7 @@ def load_excel_data(file_path, year, month):
    - 草稿記錄：Baseline 置頂（可載入，不可刪除），草稿可載入和刪除（🗑 按鈕）
    - Baseline 比較：顯示目前腳本與 Baseline 的差異（左右並排），可設為新 Baseline 或從 Baseline 還原
    - 預覽功能：使用 utils/data_formatter.py 生成實際變數替換後的 Prompt
+   - Prompt 組管理（總覽頁面）：選擇組 → 預覽 → 一鍵套用整組 / 儲存目前腳本為新組
 
 如果專案沒有 Streamlit UI：
 1. 建立新的 prompt_editor_ui.py
@@ -327,7 +334,21 @@ Stage 腳本目錄：[如 scripts/stages/]
 參考：prompt_management_system_spec.yaml 的 Version Manager 章節
 ```
 
-### 需求 4：確保 UI 預覽與實際執行一致
+### 需求 4：Prompt 組切換（一鍵套用整套 prompt）
+
+```
+我需要在總覽頁面一次切換所有 Stage 的 prompt：
+
+步驟：
+1. 在 PromptManager 新增 Prompt Set 方法（list/get/save/apply/delete）
+2. 在 UI 總覽頁面新增組管理區塊（選擇、預覽、套用、儲存新組）
+3. baseline 組自動從 baselines/ 建立，不可刪除
+4. 套用時逐 stage 呼叫 update_script_prompts()（自動備份）
+
+參考：prompt_management_system_spec.yaml 的 prompt_set_ui 章節
+```
+
+### 需求 5：確保 UI 預覽與實際執行一致
 
 ```
 我的 UI 預覽結果與實際執行不一致，請幫我修正：
@@ -389,6 +410,6 @@ Stage 腳本目錄：[如 scripts/stages/]
 
 ---
 
-**版本：** 1.5.1
-**最後更新：** 2026-02-19
+**版本：** 1.6.0
+**最後更新：** 2026-02-24
 **適用專案：** 多階段 AI Workflow（報告生成、內容分析、數據處理等）

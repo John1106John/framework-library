@@ -10,12 +10,13 @@
 - 📄 **類型**：系統設計規格（YAML 格式）
 - 🎯 **用途**：給 AI（Claude、GPT、Gemini）的完整規格
 - 📊 **大小**：~34 KB
-- 🔖 **版本**：v1.5.1 (2026-02-19)
+- 🔖 **版本**：v1.6.0 (2026-02-24)
 
 **包含內容：**
 - 系統架構設計
 - PromptManager 類別完整實作規格
 - Baseline 基準版本管理（儲存、比較、還原）
+- Prompt 組管理（整套 prompt 切換、預覽、套用）
 - 草稿管理（暫存、載入、刪除）
 - Streamlit UI 設計模式（含 Baseline 比較 UI）
 - 版本管理機制
@@ -136,6 +137,13 @@ prompt_management_spec/
 - Baseline 不可刪除，僅能覆蓋更新
 - 草稿記錄中置頂顯示 Baseline
 
+### 🔀 Prompt 組切換
+- 將所有 Stage 的 prompt 儲存為命名組（如 baseline、conservative、v2_draft）
+- 在總覽頁面一鍵套用整組 prompt 到所有 Stage 腳本
+- 預覽組內容：逐 Stage 顯示 prompt key + 前 150 字 + 與目前腳本差異（✅/⚠️）
+- baseline 組自動從 baselines/ 建立，不可刪除
+- 自訂組可新增、刪除、重新命名
+
 ### 🚀 易於使用
 - 清晰的使用步驟
 - 複製即用的 Prompt 範本
@@ -155,6 +163,9 @@ project/
 ├── prompts/
 │   ├── *.json                     # JSON 快取
 │   ├── baselines/                 # Baseline 基準版本（不可刪除）
+│   ├── sets/                      # Prompt 組（每個子資料夾為一組）
+│   │   ├── baseline/              # 自動從 baselines/ 建立
+│   │   └── <custom_name>/         # 自訂組
 │   ├── backups/                   # 自動備份
 │   └── drafts/                    # 草稿（可刪除）
 ├── temp/
@@ -236,5 +247,5 @@ cp -r prompt_management_spec /path/to/new/project/
 
 ---
 
-**版本：v1.5.1 (2026-02-19)**
+**版本：v1.6.0 (2026-02-24)**
 **來源：台美 ETF 淨流量分析月報專案**
