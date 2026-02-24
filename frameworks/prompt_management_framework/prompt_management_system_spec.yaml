@@ -15,16 +15,16 @@
 #   本規格基於「台美 ETF 淨流量分析月報」專案的實際經驗編寫，
 #   已在生產環境驗證可行性。
 #
-# 🔖 版本：v1.5.1 (2026-02-19)
+# 🔖 版本：v1.6.0 (2026-02-24)
 # ============================================================================
 
 metadata:
   name: "Prompt Management System"
-  version: "1.5.1"
-  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性、輸入驗證、Stage 間統一讀取"
+  version: "1.6.0"
+  description: "AI Workflow 的 Prompt 版本管理系統 - 提取、編輯、版本控制、Baseline 管理、預覽執行一致性、輸入驗證、Stage 間統一讀取、Workflow 結果摘要"
   author: "John1106John"
   created_at: "2026-02-09"
-  updated_at: "2026-02-19"
+  updated_at: "2026-02-24"
   license: "MIT"
   compatibility:
     - "多階段 AI Workflow"
@@ -1308,6 +1308,114 @@ input_validation:
     - "check_inputs() 應快速執行（只檢查檔案存在性，不讀取內容）"
     - "上月對比用的數據通常為 WARNING，當月必要數據為 ERROR"
     - "前置 Stage 輸出中，核心段落用 ERROR，補充段落用 WARNING"
+
+  workflow_result_reporting:
+    description: |
+      Workflow 執行完成後，將每個 Stage 的成功/失敗狀態寫入 JSON 摘要檔，
+      供 UI 讀取並以視覺化方式呈現。解決「Workflow 靜默失敗」的問題：
+      即使中間 Stage 失敗但流程繼續，使用者也能在 UI 一目了然地看到哪些 Stage 失敗了。
+
+    problem: |
+      常見的 Workflow 錯誤處理模式是「中間 Stage 失敗 → 印 WARNING → 繼續執行」，
+      這導致：
+      1. UI 只看 process return code（0=成功），即使多個 Stage 失敗也顯示「✅ 完成」
+      2. 失敗訊息藏在滾動的 console log 中，很容易漏看
+      3. 使用者不知道最終產出的品質（哪些段落是正常生成的、哪些是缺失的）
+
+    solution: |
+      Workflow 在所有退出路徑寫出結構化的結果 JSON，UI 讀取後顯示摘要表格。
+
+    result_json:
+      path: "temp/workflow_result_{YYYYMM}.json"
+      format: |
+        ```json
+        {
+          "stages": {
+            "Stage 0": true,
+            "Stage 1": true,
+            "Stage 2": false,
+            "Stage 3": true,
+            ...
+          },
+          "timestamp": "2026-02-24 15:30:00",
+          "success": false,
+          "success_count": 7,
+          "total_count": 9
+        }
+        ```
+
+    workflow_side:
+      description: |
+        在 Workflow 腳本中新增 write_workflow_result() 函式，
+        並在所有退出路徑（正常完成、Stage 7 失敗中斷、Stage 8 失敗中斷）呼叫。
+      code: |
+        ```python
+        import json
+
+        def write_workflow_result(data_prefix, stages_status, work_dir):
+            """寫出 workflow 結果摘要 JSON，供 UI 讀取"""
+            result = {
+                "stages": stages_status,
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "success": all(stages_status.values()),
+                "success_count": sum(1 for v in stages_status.values() if v),
+                "total_count": len(stages_status),
+            }
+            result_file = work_dir / "temp" / f"workflow_result_{data_prefix}.json"
+            result_file.parent.mkdir(exist_ok=True)
+            with open(result_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+        ```
+      exit_paths:
+        - "正常完成（所有 Stage 跑完）→ 在 logger.finalize() 前寫入"
+        - "關鍵 Stage 失敗中斷（如 Stage 7/8）→ return False 前寫入，未執行的 Stage 標記為 False"
+      important: |
+        所有退出路徑都必須寫入 JSON，包括提前中斷的情況。
+        未執行的 Stage 應標記為 False，讓 UI 能正確顯示。
+
+    ui_side:
+      description: |
+        UI 在 Workflow 執行完成後（不論 return code），讀取結果 JSON 並顯示摘要。
+      code: |
+        ```python
+        def show_workflow_result(prefix):
+            """讀取並顯示 workflow 結果摘要"""
+            result_file = Path("temp") / f"workflow_result_{prefix}.json"
+            if not result_file.exists():
+                return
+            import json
+            data = json.loads(result_file.read_text(encoding='utf-8'))
+            stages = data.get("stages", {})
+            failed = [k for k, v in stages.items() if not v]
+
+            if failed:
+                st.warning(f"**Workflow 結果：{data['success_count']}/{data['total_count']} 個 Stage 成功**")
+            else:
+                st.success(f"**Workflow 結果：全部 {data['total_count']} 個 Stage 成功**")
+
+            cols = st.columns(3)
+            for i, (stage, success) in enumerate(stages.items()):
+                with cols[i % 3]:
+                    if success:
+                        st.markdown(f":green[✅ {stage}] {name}")
+                    else:
+                        st.markdown(f":red[❌ {stage}] {name}")
+        ```
+      placement: |
+        在 run_cmd() 呼叫之後、版本快照之前呼叫 show_workflow_result()。
+        不論 run_cmd() 回傳 True 或 False 都要呼叫（因為失敗時更需要看到摘要）。
+        ```python
+        ok = run_cmd(f"python run_complete_workflow.py {year} {month}", "完整 Workflow")
+        show_workflow_result(prefix)  # ← 不論成功失敗都顯示
+        if ok:
+            # 版本快照...
+        ```
+
+    benefits:
+      - "✅ 失敗可見：即使 return code 為 0，也能看到哪些 Stage 失敗"
+      - "✅ 結構化：JSON 格式方便 UI 解析，不依賴 console log 文字解析"
+      - "✅ 持久化：結果寫入檔案，關閉 UI 後重新開啟仍可查看"
+      - "✅ 全退出路徑覆蓋：正常完成和提前中斷都有摘要"
 
 # ============================================================================
 # UI 整合設計（Streamlit）
