@@ -1,14 +1,14 @@
 # API 設定與金鑰管理框架 - 系統規格書
-# Version: 1.0.0
-# Last Updated: 2026-02-10
+# Version: 1.1.0
+# Last Updated: 2026-03-07
 
 metadata:
   name: "API Configuration & Key Rotation Framework"
-  version: "1.0.0"
+  version: "1.1.0"
   description: "集中式 API 設定與自動循環金鑰輪替框架，可快速整合到任何 Python 專案"
   author: "John1106John"
   created_at: "2026-02-10"
-  updated_at: "2026-02-10"
+  updated_at: "2026-03-07"
   license: "MIT"
   compatibility:
     - "Google Gemini API"
@@ -28,6 +28,8 @@ system_overview:
     - "詳細日誌追蹤 - 記錄每次 API 呼叫與金鑰切換"
     - "環境變數支援 - 安全的金鑰管理"
     - "快取機制 - lru_cache 減少檔案讀取"
+    - "每 Key 獨立 Rate Limiter - 每把金鑰各自計算速率，真正並行不互相阻塞"
+    - "三種並行模式 - full_parallel / sequential / group_parallel 依任務依賴關係選擇"
 
   benefits:
     zero_code_change: "改 config.yaml 即可切換模型，無需修改程式碼"
@@ -419,7 +421,239 @@ migration_from_hardcoded:
       - "✅ 自動檢測配額並重試"
       - "✅ 詳細日誌追蹤所有 API 呼叫"
 
+rate_limiter:
+  purpose: |
+    控制每把 API Key 的請求頻率，避免觸發 API 提供商的速率限制（429 Too Many Requests）。
+    每把 Key 擁有獨立的 RateLimiter 實例，互不干擾，讓多 Key 並行時各自達到最大吞吐量。
+
+  anti_pattern: |
+    錯誤做法：全域單一 RateLimiter 讓所有 Worker 共用
+      → N 把 Key × 10 req/min 的吞吐量，實際上仍被限制在 10 req/min
+
+    正確做法：每個 Worker / 每把 Key 各自持有獨立 RateLimiter 實例
+      → N 把 Key × 10 req/min = N×10 req/min 真實並行吞吐量
+
+  class_design:
+    class_name: "RateLimiter"
+    constructor:
+      parameters:
+        requests_per_minute:
+          type: int
+          default: 10
+          description: "每分鐘最大請求數（建議比 API 上限低 30% 作為緩衝）"
+        requests_per_day:
+          type: int
+          default: 1400
+          description: "每日最大請求數（Gemini 免費版上限 1500，留 100 緩衝）"
+    internal_state:
+      - "minute_window: deque — 滑動視窗記錄過去 60 秒的請求時間戳"
+      - "day_window: deque — 滑動視窗記錄過去 24 小時的請求時間戳"
+      - "lock: threading.Lock — 保證多執行緒存取安全"
+    methods:
+      wait_if_needed:
+        description: "發送請求前呼叫，必要時自動 sleep 等待"
+        logic: |
+          1. with lock:
+          2.   清除 minute_window 中超過 60 秒的記錄
+          3.   清除 day_window 中超過 86400 秒的記錄
+          4.   if len(minute_window) >= requests_per_minute:
+                 wait_time = 60 - (now - minute_window[0]) + 1
+                 sleep(wait_time)  # 注意：sleep 應在 lock 外執行（見實作注意）
+          5.   if len(day_window) >= requests_per_day:
+                 sleep 並遞迴重新檢查
+          6.   記錄本次請求時間戳到兩個視窗
+          7.   sleep(min_interval)  # 避免瞬間突發（建議 1.0 秒）
+
+  implementation_notes:
+    sleep_outside_lock: |
+      wait_if_needed() 的 sleep 必須在釋放 lock 後執行，否則其他執行緒
+      無法進入 wait_if_needed() 檢查自己的狀態，導致不必要的序列化。
+      建議做法：先在 lock 內計算出 wait_time，退出 lock 後再 sleep。
+    per_worker_instantiation: |
+      正確的實例化位置是 worker 函數內部（每次 worker 啟動時建立一個新實例），
+      而非模組層級的全域變數。
+      # 正確
+      def worker(worker_id, api_key):
+          rate_limiter = RateLimiter()   # 此 worker 專屬
+          ...
+          call_api(..., rate_limiter=rate_limiter)
+
+      # 錯誤
+      rate_limiter = RateLimiter()   # 模組層級，所有 worker 共用
+      def worker(...): ...
+
+  config_yaml_params:
+    rate_limit_rpm:
+      type: int
+      default: 10
+      description: "每把 Key 每分鐘請求上限（寫入 config.yaml 統一管理）"
+    rate_limit_rpd:
+      type: int
+      default: 1400
+      description: "每把 Key 每日請求上限"
+    min_request_interval:
+      type: float
+      default: 1.0
+      description: "同一 Key 連續兩次請求的最小間隔秒數（避免瞬間突發）"
+
+parallel_execution:
+  purpose: |
+    提供三種可選的並行模式，讓使用者依任務間的依賴關係選擇最合適的執行策略。
+    核心元件：ThreadPoolExecutor（CPU-bound 請改用 ProcessPoolExecutor）+ Queue（動態任務分配）。
+
+  modes:
+    full_parallel:
+      name: "全並行模式"
+      description: |
+        所有任務同時放入佇列，由 N 個 Worker 動態競爭取用。
+        任務之間完全獨立，無依賴關係。
+      when_to_use:
+        - "題目 A、B、C 各自獨立，不需要其他題目的產出"
+        - "最大化吞吐量，N 把 Key 幾乎同時開跑"
+      example: |
+        # 31 道題互相獨立
+        tasks = [task_1, task_2, ..., task_31]
+        queue = Queue()
+        for t in tasks:
+            queue.put(t)
+
+        with ThreadPoolExecutor(max_workers=len(api_keys)) as executor:
+            for i, key in enumerate(api_keys):
+                executor.submit(worker, i, key, queue)
+      throughput: "N keys × RPM = 最大吞吐量"
+
+    sequential:
+      name: "序列模式"
+      description: |
+        任務按照定義順序逐一執行，每個任務完成後才啟動下一個。
+        用於任務 B 必須取得任務 A 的輸出才能繼續的情況。
+      when_to_use:
+        - "任務 B 的 prompt 需要嵌入任務 A 的結果"
+        - "任務間有嚴格的先後順序"
+        - "資源有限，只想用單一 Key"
+      example: |
+        results = {}
+        for task in ordered_tasks:
+            # 可將上一題結果注入下一題 prompt
+            prompt = task.prompt.format(**results)
+            results[task.id] = call_api(prompt, api_key, rate_limiter)
+      throughput: "1 req × RPM（不受益於多 Key 並行）"
+
+    group_parallel:
+      name: "分組並行模式"
+      description: |
+        將任務分成多個群組（Group）。
+        同一 Group 內的任務並行執行（full_parallel）。
+        Group 之間按順序執行（sequential）：必須等前一 Group 全部完成，才啟動下一 Group。
+        適合「部分有依賴、部分無依賴」的混合場景。
+      when_to_use:
+        - "題目 1-10 互相獨立可並行；題目 11-20 需要 1-10 的產出；題目 21-31 再並行"
+        - "Pipeline 有多個階段，每階段內任務獨立，但階段間有依賴"
+      structure: |
+        groups:
+          - id: "group_1"
+            tasks: [task_1, task_2, ..., task_10]   # 並行
+          - id: "group_2"
+            tasks: [task_11, task_12, ..., task_20]  # 等 group_1 完成後並行
+            depends_on: ["group_1"]
+          - id: "group_3"
+            tasks: [task_21, ..., task_31]           # 等 group_2 完成後並行
+            depends_on: ["group_2"]
+      example: |
+        for group in groups:
+            # Group 內並行（full_parallel 邏輯）
+            group_queue = Queue()
+            for t in group['tasks']:
+                group_queue.put(t)
+
+            with ThreadPoolExecutor(max_workers=len(api_keys)) as executor:
+                futures = [executor.submit(worker, i, key, group_queue)
+                           for i, key in enumerate(api_keys)]
+            # 等待這個 Group 的所有 future 完成後，才進入下一個 Group
+            for f in futures:
+                f.result()
+
+            # 將此 Group 結果存入 context，供下一個 Group 使用
+            group_results[group['id']] = collect_results(group_queue)
+      throughput: "每個 Group 內：N keys × RPM；Group 間：序列等待"
+
+  mode_selection_guide:
+    decision_tree: |
+      所有任務互相獨立？
+        YES → full_parallel（最快）
+        NO  → 任務間有嚴格全序依賴（A→B→C→...）？
+                YES → sequential
+                NO  → 可以劃分獨立群組？
+                        YES → group_parallel
+                        NO  → sequential（最保守）
+
+    comparison_table:
+      columns: ["模式", "複雜度", "吞吐量", "依賴支援"]
+      rows:
+        - ["full_parallel",  "低", "最高（N×RPM）",        "不支援（任務需完全獨立）"]
+        - ["sequential",     "低", "最低（1×RPM）",         "完全支援"]
+        - ["group_parallel", "中", "中（每 Group N×RPM）",  "組間依賴"]
+
+  shared_components:
+    task_queue:
+      type: "queue.Queue"
+      purpose: "動態任務分配，Worker 競爭取用，避免固定分配造成的負載不均"
+      pattern: |
+        # 每個 Worker 持續從 Queue 取任務直到空佇列
+        while True:
+            try:
+                task = queue.get(timeout=1)
+            except Empty:
+                break
+            process(task)
+            queue.task_done()
+
+    worker_function:
+      parameters:
+        - "worker_id: int — Worker 編號（用於日誌）"
+        - "api_key: str — 此 Worker 專屬的 API Key"
+        - "task_queue: Queue — 共用任務佇列"
+        - "results: dict（可選）— 共用結果字典，group_parallel 模式下跨 Group 傳遞產出"
+      internal:
+        - "rate_limiter = RateLimiter() — Worker 內部建立，獨立計算速率"
+        - "threading.Lock 保護 results dict 的寫入"
+
+    progress_tracking:
+      description: "執行緒安全的進度追蹤器，供 Worker 更新完成狀態"
+      fields:
+        - "total_tasks: int"
+        - "completed_tasks: int（atomic increment via Lock）"
+        - "task_status: dict[task_id, str]（processing / completed / error）"
+
+  config_yaml_params:
+    parallel_mode:
+      type: "enum"
+      values: ["full_parallel", "sequential", "group_parallel"]
+      default: "full_parallel"
+      description: "並行執行模式"
+    max_workers:
+      type: "int | 'auto'"
+      default: "auto"
+      description: "'auto' 表示等於 API Key 數量；也可手動指定上限"
+    task_groups:
+      type: "list（僅 group_parallel 模式使用）"
+      description: "定義各 Group 包含的 task id 清單與依賴關係"
+      example:
+        - id: "stage_1"
+          tasks: ["1-1", "1-2", "1-3"]
+        - id: "stage_2"
+          tasks: ["2-1", "2-2"]
+          depends_on: ["stage_1"]
+
 changelog:
+  v1.1.0:
+    date: "2026-03-07"
+    changes:
+      - "新增 per-Key 獨立 RateLimiter 機制，修正全域共用導致並行失效的問題"
+      - "新增三種並行執行模式：full_parallel / sequential / group_parallel"
+      - "新增 config.yaml 參數：parallel_mode、max_workers、task_groups、rate_limit_rpm/rpd"
+      - "新增 mode_selection_guide 決策樹與比較表"
+
   v1.0.0:
     date: "2026-02-10"
     changes:
@@ -431,12 +665,12 @@ changelog:
       - "詳細日誌追蹤"
 
 roadmap:
-  v1.1.0:
+  v1.2.0:
     - "支援 OpenAI API"
     - "支援 Anthropic Claude API"
     - "UI 儀表板（監控金鑰使用狀況）"
 
-  v1.2.0:
+  v1.3.0:
     - "動態金鑰權重分配"
     - "成本追蹤與預算控制"
     - "多帳號輪替策略"
