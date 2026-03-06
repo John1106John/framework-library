@@ -618,6 +618,32 @@ parallel_execution:
         - "rate_limiter = RateLimiter() — Worker 內部建立，獨立計算速率"
         - "threading.Lock 保護 results dict 的寫入"
 
+    thread_safety_warnings:
+      genai_configure_race_condition:
+        affected_library: "google.generativeai（Gemini SDK）"
+        problem: |
+          genai.configure(api_key) 修改的是 google.generativeai 模組層級的全域狀態（非 thread-safe）。
+          在真正並行的多 Worker 環境中，Worker-A 呼叫 configure(key_A) 之後、還未建立
+          GenerativeModel 之前，Worker-B 可能呼叫 configure(key_B) 把全域 key 覆蓋掉，
+          導致 Worker-A 實際使用了 key_B 發出請求，造成金鑰混用。
+
+          此問題在全域共用 RateLimiter 時不會出現（因為請求被序列化了），
+          但修正為 per-Worker RateLimiter 後真正並行，問題才會暴露。
+        fix: |
+          用 threading.Lock 包住 configure() + GenerativeModel() 的建立，
+          generate_content() 放在鎖外（I/O 仍然並行）。
+
+          # 模組層級
+          _genai_configure_lock = threading.Lock()
+
+          # Worker 內部
+          with _genai_configure_lock:
+              genai.configure(api_key=api_key)
+              model = genai.GenerativeModel(MODEL_NAME)
+          # generate_content 在鎖外，保持 I/O 並行
+          response = model.generate_content(prompt, ...)
+        scope: "僅影響 google.generativeai；openai / anthropic SDK 無此問題（各自使用 client 實例）"
+
     progress_tracking:
       description: "執行緒安全的進度追蹤器，供 Worker 更新完成狀態"
       fields:
@@ -653,6 +679,7 @@ changelog:
       - "新增三種並行執行模式：full_parallel / sequential / group_parallel"
       - "新增 config.yaml 參數：parallel_mode、max_workers、task_groups、rate_limit_rpm/rpd"
       - "新增 mode_selection_guide 決策樹與比較表"
+      - "新增 genai.configure() 執行緒安全警告（Gemini SDK 模組全域狀態 race condition 及 Lock 解法）"
 
   v1.0.0:
     date: "2026-02-10"
