@@ -1,0 +1,757 @@
+# ============================================================================
+# PeriodicScribe System Specification
+# LLM 驅動的定期文章生成框架
+# ============================================================================
+# 📖 使用方式：
+#   將此 YAML 的內容作為 context 提供給 AI（Claude、GPT、Gemini 等），
+#   AI 即可根據此規格為你的專案建構或整合 PeriodicScribe 框架。
+#
+# 🎯 適用場景：
+#   任何需要以固定頻率（每日/每週/每月/每季）呼叫 LLM 生成結構化文章的系統。
+#   例如：財經報告、市場摘要、營運週報、產品分析、SEO 內容農場等。
+#
+# 📦 參考實作：
+#   etfflow_article/ — 台美 ETF 淨流量分析系統（月報 + 週報）
+#   - 月報：9 個 Stage，13 次 API 呼叫，輸出 DOCX + Markdown
+#   - 週報：5 個 Stage，4 次 API 呼叫，輸出 DOCX + Markdown
+#
+# 🔖 版本：v1.0 (2026-03-24)
+# ============================================================================
+
+system_overview:
+  name: "PeriodicScribe"
+  tagline: "LLM 驅動的定期文章生成框架"
+  purpose: |
+    PeriodicScribe 解決了以固定頻率呼叫 LLM 生成結構化長文章時的三大核心挑戰：
+    1. API 金鑰配額管理（多金鑰自動輪替，配額耗盡時無縫切換）
+    2. Prompt 版本控制（Baseline 比較、草稿系統、整套切換）
+    3. 輸出品質管理（版本快照、多版本選擇組裝、UI 即時預覽）
+
+  core_features:
+    - "多金鑰輪替 API Manager：自動檢測配額錯誤並切換金鑰，Workflow 全程共享同一 Manager 實例"
+    - "Stage 分段流程：文章每個段落對應一個 Stage，獨立執行，支援從任意 Stage 重新執行"
+    - "Prompt 管理系統：支援 Baseline 版本、草稿暫存、整套 Prompt 組切換（A/B 測試）"
+    - "輸出版本管理：每次執行自動快照，UI 可選任意歷史版本進行組裝"
+    - "Streamlit 全功能 UI：輸入管理 + 串流 Log + Prompt 編輯 + 版本記錄三 Tab 架構"
+
+  tech_stack:
+    language: "Python 3.10+"
+    ui_framework: "Streamlit >= 1.30.0"
+    llm_api: "Google Gemini API (google-generativeai >= 0.3.0)"
+    data_processing: "pandas >= 2.0.0, openpyxl >= 3.1.0"
+    output: "python-docx >= 1.1.0, Pillow >= 10.0.0"
+    utilities: "python-dotenv >= 1.0.0, matplotlib >= 3.7.0"
+
+# ============================================================================
+# 核心架構
+# ============================================================================
+
+architecture:
+  design_principles:
+    - name: "Stage 分段流程"
+      description: |
+        文章的每個段落對應一個 Stage（編號 0 起始）。
+        Stage 0 = 資料準備（無 API）
+        Stage 1~N-1 = 各段落生成（有 API）
+        Stage N = 組裝（無 API，讀取前面輸出合併成最終文件）
+        每個 Stage 可獨立執行，也可串成完整 Workflow。
+
+    - name: "共享 API Manager"
+      description: |
+        Workflow 層級建立一個 GeminiAPIManager 實例，傳給所有 Stage。
+        好處：Stage 1 耗盡金鑰 #1 → Stage 2 直接從金鑰 #2 開始，不會重新嘗試 #1。
+        Stage 單獨執行時（api_manager=None）則自行建立新 Manager。
+
+    - name: "Python 端預算數據"
+      description: |
+        所有單位換算、加總計算在 Python 端完成後才注入 Prompt。
+        Prompt 中明確標注「禁止自行換算」。
+        目的：消除 LLM 數學誤差，確保數字精確。
+
+    - name: "Prompt 作為腳本常數"
+      description: |
+        Prompt 以大寫變數 (PROMPT = \"\"\"...\"\"\") 形式定義在各 Stage 腳本中。
+        使用 regex pattern r'(PROMPT(?:_\\w+)?)\\s*=\\s*\"\"\"(.*?)\"\"\"' 提取/寫回。
+        UI 中編輯後可立即預覽，點「更新到腳本」寫回 .py 檔。
+
+    - name: "版本快照系統"
+      description: |
+        執行後自動快照輸出到版本庫。
+        組裝時可從版本下拉選擇，實現「組裝指定版本組合」。
+        活動版本用 JSON 追蹤，UI 顯示 ★ 標記。
+
+  components:
+    - name: "GeminiAPIManager"
+      file: "utils/api/gemini_api_utils.py"
+      role: "LLM API 管理核心"
+      responsibilities:
+        - "從環境變數讀取多個 API 金鑰（API_KEYS 逗號分隔或 GOOGLE_API_KEY）"
+        - "自動偵測配額錯誤關鍵詞：quota, rate limit, resource exhausted, 429"
+        - "配額耗盡時自動輪替到下一金鑰，非配額錯誤直接拋出"
+        - "提供 generate_content(prompt, images=None) 統一呼叫介面"
+
+    - name: "PromptManager"
+      file: "utils/prompt_manager.py"
+      role: "月報 Prompt 生命週期管理"
+      responsibilities:
+        - "get_prompts(report_type)：從腳本 regex 提取 PROMPT 變數"
+        - "update_script_prompts(report_type, prompts)：寫回腳本（先備份）"
+        - "Baseline 系統：save_baseline / get_baseline / compare_with_baseline / restore_from_baseline"
+        - "Prompt Set（組）：list/get/save/apply/delete/rename，支援整套切換"
+
+    - name: "WeeklyPromptManager"
+      file: "weekly_report/utils/weekly_prompt_manager.py"
+      role: "週報 Prompt 管理（獨立版本，路徑指向 weekly_report/）"
+      responsibilities:
+        - "與 PromptManager 相同的 regex 邏輯，但 SCRIPT_MAP 指向週報 stages/"
+        - "Baseline 路徑：weekly_report/prompts/baselines/stage{N}_baseline.json"
+
+    - name: "DataFormatter"
+      file: "utils/data_formatter.py"
+      role: "資料預處理與格式化"
+      responsibilities:
+        - "Excel → Markdown 表格轉換"
+        - "單位換算（$mm ÷ 100 → 億美元；元 ÷ 1億 → 億台幣）"
+        - "群組加總計算（股票型/債券型/槓桿反向/其他）"
+        - "Prompt 禁止自行換算——所有數字在此函數完成"
+
+    - name: "StageIO"
+      file: "utils/stage_io.py"
+      role: "Stage 輸出統一讀取（月報）"
+      responsibilities:
+        - "read_stage_output(stage_num, year, month, source='active')"
+        - "source='active'：先查 active_versions JSON → 版本庫，無則回退 temp/"
+        - "source='temp'：只讀 temp/（Workflow 模式，保證讀到最新生成）"
+
+    - name: "WorkflowOrchestrator"
+      file: "run_complete_workflow.py (月報) / weekly_report/run_weekly.py (週報)"
+      role: "完整流程編排"
+      responsibilities:
+        - "建立共享 GeminiAPIManager，傳給所有 Stage"
+        - "依序執行所有 Stage，收集成功/失敗狀態"
+        - "支援 --start-stage 從指定 Stage 開始"
+
+    - name: "StreamlitUI"
+      file: "ui_app.py (月報) / weekly_report/weekly_ui.py (週報)"
+      role: "視覺化操作介面"
+      responsibilities:
+        - "Sidebar：週期選擇（年月/年週）、資料狀態、Stage 導覽"
+        - "每個 Stage：三 Tab 架構（輸入管理 / 執行 / 版本記錄）"
+        - "Popen 串流 Log：subprocess.Popen → for line in proc.stdout → st.empty()"
+        - "Prompt 管理 UI：編輯 → 預覽 → 儲存草稿 → 更新腳本 → Baseline 比較"
+
+  data_flow: |
+    原始資料（Excel/CSV/網路爬蟲）
+        ↓ Stage 0（資料準備）
+    清洗資料 + 計算指標 + 生成圖片
+        ↓ DataFormatter（Python 端預算）
+    Markdown 表格 + 數值字串（已換算單位）
+        ↓ build_prompts()（Prompt 組裝）
+    完整 Prompt 文字（變數已替換）
+        ↓ GeminiAPIManager.generate_content()
+    LLM 輸出文字
+        ↓ 寫入 temp/{output_prefix}_{period}.md
+    Stage 輸出檔案
+        ↓ weekly_snapshot() / snapshot()（版本管理）
+    版本庫 temp/versions/{period}/stage{N}/v{ts}.md
+        ↓ 組裝 Stage（Stage N-1）
+    最終文件（Markdown + DOCX）
+
+# ============================================================================
+# Pipeline 標準模式
+# ============================================================================
+
+pipeline_patterns:
+  stage_standard_interface:
+    description: "每個 Stage 腳本的標準函數介面"
+    functions:
+      - name: "main(year, period, api_manager=None)"
+        purpose: "Stage 主函數，支援獨立/Workflow 雙模式"
+        logic: |
+          if api_manager is None:
+              api_manager = GeminiAPIManager()  # 獨立執行模式
+          # 否則使用傳入的共享 Manager（Workflow 模式）
+          prompts = build_prompts(year, period)
+          result = api_manager.generate_content(prompts[0]['text'])
+          output_file.write_text(result, encoding='utf-8')
+
+      - name: "build_prompts(year, period, prompt_texts=None)"
+        purpose: "組裝完整 Prompt，支援 UI 預覽覆蓋"
+        logic: |
+          prompt = (prompt_texts or {}).get('PROMPT', PROMPT)  # UI 可覆蓋
+          data = load_data_for_period(year, period)             # 讀取資料
+          final = prompt.replace("{{VAR}}", data)              # 替換變數
+          return [{'name': 'PROMPT', 'text': final}]
+
+      - name: "check_inputs(year, period)"
+        purpose: "執行前輸入驗證，回傳 (level, message) 列表"
+        returns: "[(\"ERROR\"|\"WARN\"|\"INFO\", str), ...]"
+
+  api_manager_sharing:
+    description: "Workflow 層級共享 API Manager 模式"
+    orchestrator_code: |
+      # run_complete_workflow.py
+      api_manager = GeminiAPIManager(model)
+      run_stage1(year, period, api_manager=api_manager)
+      run_stage2(year, period, api_manager=api_manager)
+      # ... 所有 Stage 共享同一 Manager 實例
+
+    stage_code: |
+      # 每個 stage*.py 的 main()
+      def main(year, period, api_manager=None):
+          if api_manager is None:
+              api_manager = GeminiAPIManager()  # 單獨執行模式
+          result = api_manager.generate_content(prompt)
+
+  prompt_injection_variables:
+    description: "Prompt 中使用雙花括號佔位符，build_prompts() 中替換"
+    static_variables: "{{YEAR}}, {{MONTH}}, {{WEEK}}, {{DATE_RANGE}} 等可在 build 時靜態替換"
+    dynamic_variables: "{{data_comparison}}, {{equity_flow_curr}} 等需讀取資料後替換"
+    rule: "所有佔位符在 build_prompts() 中替換完畢，實際送給 LLM 的 Prompt 不含佔位符"
+
+  temp_file_naming:
+    monthly: "temp/{output_prefix}_{YYYYMM}.md  例：temp/stage1_us_market_summary_202602.md"
+    weekly:  "weekly_report/temp/{output_prefix}_{YYYY-WXX}.md  例：temp/weekly_us_flow_2026-W12.md"
+
+# ============================================================================
+# 資料處理規範
+# ============================================================================
+
+data_processing:
+  pre_calculation_rule: |
+    【核心原則】所有數值計算在 Python 端完成，Prompt 中的數字是「已完成換算的結果」。
+    Prompt 中標注「禁止自行換算」或「禁止自行加總」。
+    目的：完全消除 LLM 的數學誤差。
+
+  unit_conversions:
+    us_etf_net_flows: "$mm ÷ 100 → 億美元  (1 mm = 0.01 億)"
+    us_etf_aum: "$mm ÷ 100 → 億美元"
+    us_pct_of_aum_top10: "直接使用（已是百分比數字，如 9.82 表示 9.82%）"
+    us_pct_of_aum_asset_class: "× 100（小數格式，如 0.0072 → 0.72%）"
+    tw_net_flow: "元 ÷ 1e8 → 億台幣"
+    tw_aum: "元 ÷ 1e8 → 億台幣"
+    tw_pct_of_aum: "直接使用（已是百分比）"
+
+  group_totals_pattern:
+    description: "將明細分類加總為群組後注入 Prompt，避免 LLM 自行加總"
+    function: "compute_tw_group_totals(excel, sheet) → {'equity': '123.4', 'bond': '-56.7', ...}"
+    groups:
+      equity:   "高股息, 股票指數, 產業型, ESG永續, 因子投資型, 國家／區域"
+      bond:     "投資等級公司債, 投資等級產業債, 美國公債-短/中/長天期, 新興市場債, 高收益債"
+      tactical: "槓桿／反向"
+      other:    "特別股, REITs, 股債平衡型"
+
+# ============================================================================
+# 版本管理系統
+# ============================================================================
+
+version_management:
+  snapshot_pattern:
+    trigger: "Stage 執行成功後立即呼叫 snapshot()"
+    function_monthly: |
+      def snapshot(stage_num, prefix, tag=None):
+          src = get_stage_output_path(stage_num, prefix)  # temp/{prefix}.md
+          d = VERSIONS_BASE / prefix / f"stage{stage_num}"
+          d.mkdir(parents=True, exist_ok=True)
+          vid = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+          shutil.copy2(src, d / f"{vid}.md")
+          return vid
+
+    function_weekly: |
+      def weekly_snapshot(stage_num, label, tag=None):
+          # 同邏輯，路徑改為 weekly_report/temp/
+
+  active_version_tracking:
+    file_monthly: "temp/active_versions_{YYYYMM}.json"
+    file_weekly:  "weekly_report/temp/active_versions_{YYYY-WXX}.json"
+    format: |
+      {
+        "1": "v20260224_150000",
+        "2": "v20260224_151200",
+        "3": "v20260224_152500"
+      }
+
+  assembly_version_selection:
+    description: "組裝 Stage 的 UI 允許為每個依賴 Stage 選擇特定版本"
+    ui_pattern: |
+      # Stage 4/8（組裝）頁面
+      for dep_sn in [1, 2, 3]:
+          vers = get_versions(dep_sn, label)
+          chosen = st.selectbox(f"Stage {dep_sn} 版本", [v["id"] for v in vers])
+      if st.button("套用選定版本到 temp/"):
+          apply_version(dep_sn, label, chosen)  # 複製版本檔案到 temp/
+      # 再執行組裝 Stage，它會讀取 temp/ 的檔案
+
+  read_modes:
+    active: |
+      source='active'（UI 預覽 & 執行時）：
+      1. 查 active_versions_{period}.json 中的版本 ID
+      2. 讀取對應的版本庫檔案
+      3. 若無版本記錄，回退讀取 temp/
+    temp: |
+      source='temp'（一鍵 Workflow）：
+      只讀 temp/，保證讀到剛生成的最新結果，忽略版本選擇
+
+# ============================================================================
+# Prompt 管理系統
+# ============================================================================
+
+prompt_management:
+  storage_locations:
+    scripts: "Prompt 的唯一真實來源：各 stage{N}.py 中的 PROMPT = \"\"\"...\"\"\" 常數"
+    baselines: "prompts/baselines/stage{N}_baseline.json（參考版本，人工設定）"
+    sets: "prompts/sets/{set_name}/stage{N}.json（整套 Prompt 組）"
+    backups: "prompts/backups/stage{N}_{timestamp}.py（修改前自動備份）"
+    drafts: "prompts/drafts/stage{N}_{timestamp}.json（UI 暫存草稿）"
+
+  regex_pattern:
+    extract: "r'(PROMPT(?:_\\w+)?)\\s*=\\s*\"\"\"(.*?)\"\"\"'  flags=re.DOTALL"
+    write_back: |
+      pattern = f'{var_name}\\s*=\\s*\"\"\".*?\"\"\"'
+      replacement = f'{var_name} = \"\"\"\\n{new_text}\\n\"\"\"'
+      content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+  baseline_workflow:
+    establish: "pm.save_baseline(stage_key)  # 從腳本提取並儲存 JSON"
+    compare: "pm.compare_with_baseline(stage_key)  # 回傳 {is_identical, diffs}"
+    restore: "pm.restore_from_baseline(stage_key)  # 從 baseline JSON 寫回腳本"
+
+  prompt_set_workflow:
+    description: "整套 Prompt 組（Set）允許一鍵切換所有 Stage 的 Prompt（月報功能）"
+    save: "pm.save_prompt_set('my_experiment')  # 從所有腳本提取，存到 sets/my_experiment/"
+    apply: "pm.apply_prompt_set('conservative')  # 從 sets/conservative/ 讀取，寫回所有腳本"
+    use_case: "A/B 測試不同 Prompt 風格，或維護保守版/積極版"
+
+  ui_prompt_editor:
+    session_state_key: "pe_{stage_num}_{prompt_name}  例：pe_3_PROMPT_OVERVIEW"
+    full_preview_key: "wfp_{stage_num}_{prompt_name}"
+    full_preview_trigger: |
+      # 點擊「生成完整預覽」按鈕時
+      build_fn = importlib.reload(module).build_prompts
+      edited = {pn: st.session_state.get(f"pe_{sn}_{pn}", v) for pn, v in base_prompts.items()}
+      results = build_fn(year, period, prompt_texts=edited)
+      # 顯示實際送給 LLM 的完整 Prompt（含資料）
+
+# ============================================================================
+# Streamlit UI 模式
+# ============================================================================
+
+ui_patterns:
+  sidebar:
+    components:
+      - "週期選擇：下拉選擇可用週期（月份 or 週次）"
+      - "資料狀態：Excel/CSV 是否備妥"
+      - "Stage 導覽：Radio button，顯示 ✅/⬜ 狀態 + 版本數量"
+      - "清除 Log 按鈕"
+
+  stage_page_three_tab_layout:
+    tab_1_input_management: |
+      📥 輸入管理：
+      - 顯示依賴的 Excel/圖片/CSV 資料狀態
+      - Prompt 管理 UI（ui_prompts() / ui_prompts_weekly()）
+    tab_2_execution: |
+      ▶️ 執行：
+      - 執行按鈕（type="primary"）
+      - Popen 串流 Log
+      - 執行成功後顯示目前輸出預覽
+    tab_3_version_history: |
+      📜 版本記錄：
+      - 版本列表（最新在上）
+      - 每個版本可展開預覽內容
+      - 設★主要版本 / 🗑 刪除
+
+  assembly_stage_tab_layout:
+    tab_1_config: |
+      📥 組裝配置：
+      - 每個依賴 Stage 一個 selectbox 選版本
+      - 顯示選定版本的內容預覽
+      - 「套用選定版本到 temp/」按鈕
+    tab_2_execution: "▶️ 執行：串流 Log"
+    tab_3_output: "📄 輸出：Markdown 預覽 + DOCX 下載按鈕"
+
+  popen_streaming:
+    code: |
+      def run_cmd(module, year, period):
+          cmd = [sys.executable, "-m", module, "--year", str(year), "--period", str(period)]
+          proc = subprocess.Popen(
+              cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+              text=True, encoding='utf-8', errors='replace', cwd=project_root
+          )
+          ph = st.empty()
+          lines = []
+          for line in proc.stdout:
+              lines.append(line.rstrip())
+              ph.code("\\n".join(lines[-50:]), language=None)
+          proc.wait()
+          return proc.returncode == 0
+
+  metric_cards:
+    description: "總覽頁面的 Stage 狀態卡片"
+    code: |
+      cols = st.columns(len(stages))
+      for i, (sn, meta) in enumerate(stages.items()):
+          ok = stage_output_exists(period, sn)
+          vers_count = len(get_versions(sn, period))
+          with cols[i]:
+              st.metric(
+                  f"Stage {sn} {meta['emoji']}",
+                  "✅ 完成" if ok else "⬜ 待執行",
+                  delta=f"{vers_count} 版本" if vers_count else f"{meta['api']} API"
+              )
+
+# ============================================================================
+# 設定系統
+# ============================================================================
+
+configuration:
+  config_file: "config.yaml"
+  parameters:
+    - name: "model_name"
+      type: "str"
+      default: "gemini-2.5-flash"
+      description: "Gemini 模型名稱"
+      required: false
+
+    - name: "retry_delay"
+      type: "float"
+      default: 2.0
+      description: "API 重試等待秒數"
+      required: false
+
+    - name: "api_call_interval"
+      type: "int"
+      default: 2
+      description: "連續 API 呼叫之間的間隔秒數（避免 rate limit）"
+      required: false
+
+  environment_variables:
+    - name: "API_KEYS"
+      format: "key1,key2,key3"
+      description: "多個 Gemini API 金鑰，逗號分隔（優先使用）"
+      required: "API_KEYS 或 GOOGLE_API_KEY 二擇一"
+
+    - name: "GOOGLE_API_KEY"
+      format: "AIza..."
+      description: "單一 Gemini API 金鑰"
+      required: "API_KEYS 或 GOOGLE_API_KEY 二擇一"
+
+  config_access:
+    code: |
+      from utils.config import get_model_name, get_api_call_interval, get_retry_delay
+      model = get_model_name()          # 讀取 config.yaml，有快取
+      interval = get_api_call_interval()
+
+# ============================================================================
+# 目錄結構
+# ============================================================================
+
+directory_structure:
+  description: |
+    以下為參考實作（etfflow_article）的目錄結構。
+    {project_root} 是你的專案根目錄。
+    新專案可只保留核心 utils/ 目錄，其餘依需求添加。
+
+  core_files_minimum:
+    - "utils/api/gemini_api_utils.py     # 必要：API 管理核心"
+    - "utils/config.py                   # 必要：設定讀取"
+    - "utils/prompt_manager.py           # 建議：Prompt 管理"
+    - "config.yaml                       # 必要：設定檔"
+    - ".env                              # 必要：API 金鑰"
+    - "requirements.txt                  # 依賴清單"
+
+  full_layout: |
+    {project_root}/
+    ├── utils/                           # 核心工具庫（可直接複製）
+    │   ├── api/
+    │   │   └── gemini_api_utils.py      # GeminiAPIManager（金鑰輪替）
+    │   ├── config.py                    # 設定讀取（config.yaml + .env）
+    │   ├── data_formatter.py            # 資料格式化（可根據領域客製化）
+    │   ├── stage_io.py                  # Stage 輸出統一讀取
+    │   ├── prompt_manager.py            # PromptManager（Baseline/Set）
+    │   └── logging/
+    │       └── workflow_logger.py       # WorkflowLogger（JSON + 文字）
+    │
+    ├── {report_type}/                   # 每個報告類型一個目錄
+    │   ├── stages/                      # Stage 腳本
+    │   │   ├── stage0_{data_prep}.py    # 資料準備（無 API）
+    │   │   ├── stage1_{section1}.py     # 段落 1（有 API）
+    │   │   ├── stage2_{section2}.py     # 段落 2（有 API）
+    │   │   └── stage{N}_{assembly}.py   # 組裝（無 API）
+    │   ├── utils/
+    │   │   ├── {report_type}_data_formatter.py  # 領域特定格式化
+    │   │   └── {report_type}_prompt_manager.py  # 獨立 Prompt 管理器
+    │   ├── prompts/
+    │   │   ├── baselines/               # stage{N}_baseline.json
+    │   │   ├── sets/                    # 整套 Prompt 組（可選）
+    │   │   ├── backups/                 # 腳本修改前自動備份
+    │   │   └── drafts/                  # UI 暫存草稿
+    │   ├── data/                        # 輸入資料（Excel、CSV 等）
+    │   ├── images/                      # 生成圖片
+    │   ├── temp/                        # Stage 輸出 + 版本庫
+    │   │   ├── {prefix}_{period}.md     # Stage 輸出
+    │   │   ├── active_versions_{period}.json
+    │   │   └── versions/{period}/stage{N}/v{ts}.md
+    │   ├── run_{report_type}.py         # Workflow 編排腳本
+    │   └── {report_type}_ui.py          # Streamlit UI
+    │
+    ├── output_{period}/                 # 最終輸出（自動生成）
+    │   ├── {report}_{period}_final.md
+    │   └── {report}_{period}_完整版.docx
+    │
+    ├── config.yaml                      # 全域設定
+    ├── .env                             # API 金鑰（不 commit）
+    ├── .env.example                     # 金鑰範例
+    └── requirements.txt
+
+# ============================================================================
+# 整合指南
+# ============================================================================
+
+integration_guide:
+  prerequisites:
+    - "Python 3.10+"
+    - "pip install google-generativeai pandas openpyxl python-docx streamlit python-dotenv"
+    - "至少一個 Google Gemini API 金鑰（免費額度或付費）"
+
+  integration_steps:
+    - step: 1
+      title: "複製核心工具庫"
+      actions:
+        - "複製 utils/api/gemini_api_utils.py"
+        - "複製 utils/config.py"
+        - "複製 utils/prompt_manager.py（可選）"
+        - "建立 config.yaml（從 config.yaml.example）"
+
+    - step: 2
+      title: "設定 API 金鑰"
+      actions:
+        - "建立 .env 檔案"
+        - "寫入 API_KEYS=key1,key2 或 GOOGLE_API_KEY=your_key"
+        - "確認 .env 在 .gitignore 中"
+
+    - step: 3
+      title: "定義你的 Stage 腳本"
+      actions:
+        - "依照 pipeline_patterns.stage_standard_interface 的格式建立 stage*.py"
+        - "在腳本頂部定義 PROMPT = \"\"\"...\"\"\""
+        - "實作 build_prompts(year, period, prompt_texts=None)"
+        - "實作 main(year, period, api_manager=None)"
+
+    - step: 4
+      title: "建立 Workflow 編排腳本"
+      actions:
+        - "建立 run_{report_type}.py"
+        - "建立共享 GeminiAPIManager"
+        - "依序呼叫各 Stage 的 main()，傳入 api_manager"
+
+    - step: 5
+      title: "（可選）建立 Streamlit UI"
+      actions:
+        - "複製 weekly_report/weekly_ui.py 作為模板"
+        - "修改 STAGE_META 字典、_TEMP_FILE_MAP"
+        - "執行：streamlit run {report_type}_ui.py"
+
+  verification:
+    steps:
+      - "python -c \"from utils.api.gemini_api_utils import GeminiAPIManager; m = GeminiAPIManager(); print(m.get_current_key_info())\""
+      - "python {stage_script}.py --year 2026 --period 12  # 測試單一 Stage"
+      - "python run_{report_type}.py 2026 12  # 測試完整 Workflow"
+      - "streamlit run {report_type}_ui.py  # 測試 UI"
+
+# ============================================================================
+# 已知問題與解決方案
+# ============================================================================
+
+known_issues:
+  - issue: "Windows 上中文輸出亂碼"
+    cause: "Windows 終端預設 cp950/gbk 編碼"
+    solution: |
+      在每個腳本頂部加入：
+      if sys.platform == 'win32':
+          sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+          sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+  - issue: "圖片路徑錯誤（儲存到專案根目錄而非 images/）"
+    cause: "matplotlib plt.savefig() 使用相對路徑，但 cwd 不固定"
+    solution: "務必使用絕對路徑：output_path = IMAGES_DIR / filename; plt.savefig(str(output_path))"
+
+  - issue: "UI 中 Prompt 預覽顯示舊版本（模組快取）"
+    cause: "Python import 系統快取已載入的模組"
+    solution: |
+      使用 importlib.reload()：
+      if module_name in sys.modules:
+          mod = importlib.reload(sys.modules[module_name])
+      else:
+          mod = importlib.import_module(module_name)
+
+  - issue: "Streamlit 多個 widget 出現 DuplicateWidgetID 錯誤"
+    cause: "在 loop 中建立 widget 未指定唯一 key"
+    solution: "所有 widget 的 key 包含 stage_num 和 prompt_name：key=f'pe_{sn}_{pname}'"
+
+  - issue: "版本管理的 selectbox lambda 閉包問題（Python lambda 延遲求值）"
+    cause: "for loop 中的 lambda 共享同一個變數引用"
+    solution: "使用預設參數綁定：format_func=lambda v, av=active_vid: f'{\"★ \" if v == av else \"\"}{v}'"
+
+# ============================================================================
+# 給 AI 的實作指南
+# ============================================================================
+
+ai_implementation_guide:
+  overview: |
+    當 AI 收到此規格時，應該按照以下步驟幫使用者建立新的 PeriodicScribe 實例：
+
+  steps:
+    - step: 1
+      action: "分析使用者的報告需求"
+      details: |
+        詢問：
+        - 報告頻率（每日/每週/每月）
+        - 段落數量（幾個 Stage）
+        - 資料來源（Excel、API、CSV、網路爬蟲）
+        - 輸出格式（Markdown、DOCX、PDF）
+        - 語言（中文/英文/其他）
+
+    - step: 2
+      action: "複製核心工具庫"
+      details: |
+        必須複製的檔案：
+        - utils/api/gemini_api_utils.py（不需修改）
+        - utils/config.py（不需修改）
+        建立的檔案：
+        - config.yaml（從模板）
+        - .env（填入 API 金鑰）
+
+    - step: 3
+      action: "依照 Stage 結構建立各段落腳本"
+      details: |
+        每個 stage{N}_{section_name}.py 必須包含：
+        - PROMPT = \"\"\"...\"\"\"（或多個 PROMPT_XXX）
+        - def check_inputs(year, period) -> list
+        - def build_prompts(year, period, prompt_texts=None) -> list
+        - def main(year, period, api_manager=None) -> bool
+        注意 prompt_texts=None 參數是必須的（供 UI 預覽用）
+
+    - step: 4
+      action: "建立 Workflow 編排腳本"
+      details: |
+        run_{report_type}.py 的關鍵模式：
+        api_manager = GeminiAPIManager(model)
+        results = {}
+        for sn, fn in stage_functions.items():
+            results[sn] = fn(year, period, api_manager=api_manager)
+
+    - step: 5
+      action: "建立 Streamlit UI（可選）"
+      details: |
+        使用 weekly_report/weekly_ui.py 作為模板：
+        1. 修改 STAGE_META 字典（stage 名稱、API 次數、模組路徑）
+        2. 修改 _TEMP_FILE_MAP（temp 檔名格式）
+        3. 修改 sidebar 的週期選擇邏輯
+        4. 保留 run_weekly_cmd()、ui_prompts_weekly()、ui_weekly_versions() 不變
+
+  best_practices:
+    - "Prompt 中的範例輸出（Style Reference）非常重要，幫助 LLM 理解格式要求"
+    - "build_prompts() 中應有詳細的註釋說明每個佔位符的來源"
+    - "每個 Stage 的 main() 應輸出清楚的進度訊息（供 Popen 串流顯示）"
+    - "數值格式化函數集中在 data_formatter.py，不散落在各 stage 腳本"
+    - "Stage 之間的依賴（如 Stage N 讀取 Stage N-1 的輸出）使用 stage_io.py 統一讀取"
+
+# ============================================================================
+# 快速開始範例
+# ============================================================================
+
+quick_start_example:
+  scenario: "建立一個每週生成「科技新聞摘要報告」的系統，分 3 個段落"
+
+  directory_structure: |
+    tech_weekly/
+    ├── stages/
+    │   ├── stage0_fetch_news.py      # 抓取本週新聞
+    │   ├── stage1_us_tech.py         # 美國科技摘要
+    │   ├── stage2_asia_tech.py       # 亞洲科技摘要
+    │   ├── stage3_analysis.py        # 趨勢分析
+    │   └── stage4_assembly.py        # 組裝輸出
+    ├── utils/
+    │   └── tech_data_formatter.py
+    ├── prompts/baselines/
+    ├── temp/
+    ├── run_tech_weekly.py
+    ├── tech_weekly_ui.py
+    └── (從 utils/ 複製的核心工具)
+
+  stage1_example: |
+    # stages/stage1_us_tech.py
+
+    PROMPT = \"\"\"
+    # Role
+    你是一位科技媒體分析師，請根據以下本週美國科技新聞摘要，撰寫一段 3-5 句的精要評述。
+
+    # Input Data
+    {{NEWS_SUMMARY}}
+
+    # Requirements
+    - 聚焦最重要的 2-3 個事件
+    - 客觀描述，禁止誇飾
+    - 以「本週美國科技產業...」開頭
+    \"\"\"
+
+    def build_prompts(year, week, prompt_texts=None):
+        prompt = (prompt_texts or {}).get('PROMPT', PROMPT)
+        news = load_us_tech_news(year, week)  # 你的資料讀取函數
+        final = prompt.replace("{{NEWS_SUMMARY}}", news)
+        return [{'name': 'PROMPT', 'text': final}]
+
+    def main(year, week, api_manager=None):
+        if api_manager is None:
+            api_manager = GeminiAPIManager()
+        prompts = build_prompts(year, week)
+        result = api_manager.generate_content(prompts[0]['text'])
+        output = Path("temp") / f"us_tech_{year}-W{week:02d}.md"
+        output.write_text(result, encoding='utf-8')
+        return True
+
+# ============================================================================
+# 常見問題
+# ============================================================================
+
+faq:
+  - question: "可以用 OpenAI 或 Claude API 嗎？"
+    answer: |
+      可以。只需替換 GeminiAPIManager 的實作：
+      - generate_content() 內部改呼叫 OpenAI/Anthropic SDK
+      - 金鑰輪替邏輯保持不變（只需修改配額錯誤關鍵詞）
+      其餘 Pipeline 架構完全不需修改。
+
+  - question: "如何增加新的報告頻率（如每季）？"
+    answer: |
+      建立新目錄 quarterly_report/，遵循相同的 Stage 結構。
+      前綴格式自訂（如 YYYYQQ：202601 代表 2026 Q1）。
+      週期選擇 UI 改為季度選擇下拉。
+
+  - question: "Stage 之間有複雜依賴怎麼辦？"
+    answer: |
+      使用 StageIO 的 read_stage_output() 讀取前置 Stage 輸出：
+      stage3_output = read_stage_output(3, year, month, source=dep_source)
+      dep_source 由 Workflow 傳入（'temp' 保證讀最新生成；'active' 讀 UI 選定版本）
+
+  - question: "如何處理 LLM 輸出品質不穩定？"
+    answer: |
+      1. 使用版本管理系統：執行多次，選最好的版本
+      2. Prompt Set 管理：維護多套 Prompt，針對不同情況切換
+      3. 參考 /etf-qa skill 的 7 大 AI 問題檢查框架
+      4. Prompt 中加入 Style Reference（具體範例輸出）
+
+  - question: "DOCX 生成中文字型問題怎麼解決？"
+    answer: |
+      在 python-docx 的 Document 初始化後設定：
+      style = doc.styles['Normal']
+      style.font.name = '微軟正黑體'  # Windows
+      # 或 'PingFang TC'  # macOS
+      每個 heading 的 runs 也需要個別設定 font.name
+
+  - question: "如何在沒有 UI 的環境（如 CI/CD）執行？"
+    answer: |
+      直接執行 run_{report_type}.py：
+      python run_tech_weekly.py 2026 12
+      結果儲存在 output_{period}/ 目錄。
+      Streamlit UI 是可選的，不影響 Pipeline 執行。

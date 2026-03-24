@@ -50,5 +50,27 @@
       "download_url": "https://github.com/John1106John/framework-library/tree/main/frameworks/prompt_management_framework",
       "raw_spec_url": "https://raw.githubusercontent.com/John1106John/framework-library/main/frameworks/prompt_management_framework/prompt_management_system_spec.yaml"
     }
+  ,
+    {
+      "id": "periodic-scribe",
+      "name": "PeriodicScribe - 定期 LLM 文章生成框架",
+      "version": "1.0.0",
+      "description": "定期（每日/每週/每月/每季）用 LLM 自動生成結構化文章的框架，含多金鑰輪替、Stage 分段架構、Prompt 版控、輸出版本快照、Streamlit UI",
+      "author": "John1106John",
+      "created_at": "2026-03-25",
+      "updated_at": "2026-03-25",
+      "tech_stack": ["Python 3.10+", "Streamlit", "google-generativeai", "python-docx", "pyyaml"],
+      "tags": ["llm", "article-generation", "periodic", "workflow", "prompt-management", "version-control", "streamlit"],
+      "path": "frameworks/PeriodicScribe",
+      "files": {
+        "spec": "PeriodicScribe_spec.yaml",
+        "readme": "README.md",
+        "integration_prompt": "AI_INTEGRATION_PROMPT.md"
+      },
+      "has_templates": false,
+      "has_examples": false,
+      "download_url": "https://github.com/John1106John/framework-library/tree/main/frameworks/PeriodicScribe",
+      "raw_spec_url": "https://raw.githubusercontent.com/John1106John/framework-library/main/frameworks/PeriodicScribe/PeriodicScribe_spec.yaml"
+    }
   ]
 }
